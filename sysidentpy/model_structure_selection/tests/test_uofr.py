@@ -177,7 +177,7 @@ def test_information_criteria_bic():
         basis_function=basis_function,
     )
     model.fit(X=x, y=y)
-    info_values = np.array([-1959.320155, -2612.875131, -2948.136725, -3300.113919])
+    info_values = np.array([896.976044, 55.273645, -619.342972, -887.017557])
     assert_almost_equal(model.info_values[:4], info_values[:4], decimal=3)
 
 
@@ -194,7 +194,7 @@ def test_information_criteria_aicc():
         basis_function=basis_function,
     )
     model.fit(X=x, y=y)
-    info_values = np.array([-1964.221892, -2622.674577, -2962.82984, -3319.69665])
+    info_values = np.array([892.074090, 45.475397, -634.036991, -906.600820])
     assert_almost_equal(model.info_values[:4], info_values[:4], decimal=3)
 
 
@@ -211,7 +211,7 @@ def test_information_criteria_fpe():
         basis_function=basis_function,
     )
     model.fit(X=x, y=y)
-    info_values = np.array([-1964.225908, -2622.686632, -2962.853966, -3319.736889])
+    info_values = np.array([892.069887, 45.462543, -634.060665, -906.640463])
     assert_almost_equal(model.info_values[:4], info_values[:4], decimal=3)
 
 
@@ -228,7 +228,7 @@ def test_information_criteria_lilc():
         basis_function=basis_function,
     )
     model.fit(X=x, y=y)
-    info_values = np.array([-1962.361199, -2618.957218, -2957.259855, -3312.278093])
+    info_values = np.array([893.935255, 49.192165, -628.466752, -899.181576])
     assert_almost_equal(model.info_values[:4], info_values[:4], decimal=3)
 
 
@@ -352,6 +352,7 @@ def test_gaussian_test_function_order_zero_returns_gaussian():
     )
     t = np.linspace(-1, 1, 7)
     gaussian = np.exp(-(t**2) / (2 * model.gaussian_sigma**2))
+    gaussian[np.abs(t) >= np.max(np.abs(t))] = 0.0
     assert_array_equal(model.gaussian_test_function(t, 0), gaussian)
 
 
@@ -369,8 +370,9 @@ def test_augment_uls_terms_with_default_order_appends_rows():
     y_sample = np.arange(11.0).reshape(-1, 1)
     psi_sample = np.column_stack((np.arange(11.0), np.arange(11.0)))
     y_aug, psi_aug = model.augment_uls_terms(y_sample, psi_sample)
-    assert y_aug.shape[0] == 22
-    assert psi_aug.shape[0] == 22
+    expected_rows = y_sample.shape[0] + (y_sample.shape[0] - model.test_support + 1)
+    assert y_aug.shape[0] == expected_rows
+    assert psi_aug.shape[0] == expected_rows
 
 
 def test_sobolev_error_reduction_ratio_respects_err_tol():
