@@ -321,6 +321,27 @@ class OFRBase(BaseMSS, metaclass=ABCMeta):
         self.theta = None
         self.pivv = None
 
+    def _default_estimation_target(self, y: np.ndarray) -> np.ndarray:
+        """Compute the standard estimation target used across MSS algorithms."""
+        return y[self.max_lag :, 0].reshape(-1, 1)
+
+    def _unpack_mss_output(
+        self,
+        mss_output: Tuple[np.ndarray, ...],
+        y: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Normalize MSS outputs to (err, piv, psi, target)."""
+        if len(mss_output) == 3:
+            err, piv, psi = mss_output
+            estimation_target = self._default_estimation_target(y)
+        elif len(mss_output) == 4:
+            err, piv, psi, estimation_target = mss_output
+        else:
+            raise ValueError(
+                "run_mss_algorithm must return (err, piv, psi) or (err, piv, psi, target)."
+            )
+        return err, piv, psi, estimation_target
+
     def _validate_params(self):
         """Validate input params."""
         if not isinstance(self.n_info_values, int) or self.n_info_values < 1:
@@ -485,14 +506,15 @@ class OFRBase(BaseMSS, metaclass=ABCMeta):
 
         for i in range(self.n_info_values):
             n_theta = i + 1
-            regressor_matrix = self.run_mss_algorithm(x, y, n_theta)[2]
-
-            tmp_theta = self.estimator.optimize(
-                regressor_matrix, y[self.max_lag :, 0].reshape(-1, 1)
+            mss_result = self.run_mss_algorithm(x, y, n_theta)
+            _, _, regressor_matrix, estimation_target = self._unpack_mss_output(
+                mss_result, y
             )
 
+            tmp_theta = self.estimator.optimize(regressor_matrix, estimation_target)
+
             tmp_yhat = np.dot(regressor_matrix, tmp_theta)
-            tmp_residual = y[self.max_lag :] - tmp_yhat
+            tmp_residual = estimation_target - tmp_yhat
             e_var = np.var(tmp_residual, ddof=1)
             output_vector[i] = self.info_criteria_function(n_theta, n_samples, e_var)
 
@@ -564,7 +586,10 @@ class OFRBase(BaseMSS, metaclass=ABCMeta):
         else:
             model_length = self.n_terms
 
-        (self.err, self.pivv, psi) = self.run_mss_algorithm(reg_matrix, y, model_length)
+        mss_result = self.run_mss_algorithm(reg_matrix, y, model_length)
+        self.err, self.pivv, psi, estimation_target = self._unpack_mss_output(
+            mss_result, y
+        )
 
         tmp_piv = self.pivv[0:model_length]
         repetition = len(reg_matrix)
@@ -577,11 +602,11 @@ class OFRBase(BaseMSS, metaclass=ABCMeta):
             )
             self.final_model = self.regressor_code[tmp_piv, :].copy()
 
-        self.theta = self.estimator.optimize(psi, y[self.max_lag :, 0].reshape(-1, 1))
+        self.theta = self.estimator.optimize(psi, estimation_target)
         if self.estimator.unbiased is True:
             self.theta = self.estimator.unbiased_estimator(
                 psi,
-                y[self.max_lag :, 0].reshape(-1, 1),
+                estimation_target,
                 self.theta,
                 self.elag,
                 self.max_lag,
