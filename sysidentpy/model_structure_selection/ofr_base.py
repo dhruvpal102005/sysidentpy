@@ -233,7 +233,35 @@ def bic(n_theta: int, n_samples: int, e_var: float) -> float:
     return info_criteria_value
 
 
-def get_info_criteria(info_criteria: str):
+def apress(n_theta: int, n_samples: int, mse: float, apress_lambda: float) -> float:
+    """Compute the APRESS criterion (eq. 9 of RMSS paper).
+
+    Parameters
+    ----------
+    n_theta : int
+        Number of selected terms (parameters).
+    n_samples : int
+        Number of available samples after lag alignment.
+    mse : float
+        Mean squared error of the model with ``n_theta`` terms.
+    apress_lambda : float
+        Small positive constant (lambda in the paper).
+
+    Returns
+    -------
+    float
+        The APRESS score for the current model size.
+    """
+
+    denom = n_samples - apress_lambda * n_theta
+    if denom <= 0:
+        # Prevent division by zero/negative scaling; fall back to large penalty.
+        return np.inf
+    scale = (n_samples / denom) ** 2
+    return scale * mse
+
+
+def get_info_criteria(info_criteria: str, apress_lambda: float = 1.0):
     """Get info criteria."""
     info_criteria_options = {
         "aic": aic,
@@ -241,6 +269,7 @@ def get_info_criteria(info_criteria: str):
         "bic": bic,
         "fpe": fpe,
         "lilc": lilc,
+        "apress": apress,
     }
     return info_criteria_options.get(info_criteria)
 
@@ -292,13 +321,15 @@ class OFRBase(BaseMSS, metaclass=ABCMeta):
         eps: np.float64 = np.finfo(np.float64).eps,
         alpha: float = 0,
         err_tol: Optional[float] = None,
+        apress_lambda: float = 1.0,
     ):
         self.order_selection = order_selection
         self.ylag = ylag
         self.xlag = xlag
         self.max_lag = self._get_max_lag()
         self.info_criteria = info_criteria
-        self.info_criteria_function = get_info_criteria(info_criteria)
+        self.apress_lambda = apress_lambda
+        self.info_criteria_function = get_info_criteria(info_criteria, apress_lambda)
         self.n_info_values = n_info_values
         self.n_terms = n_terms
         self.estimator = estimator
@@ -366,10 +397,18 @@ class OFRBase(BaseMSS, metaclass=ABCMeta):
                 f"order_selection must be False or True. Got {self.order_selection}"
             )
 
-        if self.info_criteria not in ["aic", "aicc", "bic", "fpe", "lilc"]:
+        if self.info_criteria not in ["aic", "aicc", "bic", "fpe", "lilc", "apress"]:
             raise ValueError(
-                f"info_criteria must be aic, bic, fpe or lilc. Got {self.info_criteria}"
+                f"info_criteria must be aic, aicc, bic, fpe, lilc or apress. Got {self.info_criteria}"
             )
+
+        if self.info_criteria == "apress":
+            if not isinstance(self.apress_lambda, (int, float)):
+                raise TypeError(
+                    f"apress_lambda must be a numeric value. Got {type(self.apress_lambda)}"
+                )
+            if self.apress_lambda <= 0:
+                raise ValueError(f"apress_lambda must be > 0. Got {self.apress_lambda}")
 
         if self.model_type not in ["NARMAX", "NAR", "NFIR"]:
             raise ValueError(
@@ -470,10 +509,12 @@ class OFRBase(BaseMSS, metaclass=ABCMeta):
 
         This function uses a information criterion to determine the model size.
         'Akaike'-  Akaike's Information Criterion with
-                   critical value 2 (AIC) (default).
+               critical value 2 (AIC) (default).
+        'AICc' -   Akaike's Information Criterion with finite-sample correction.
         'Bayes' -  Bayes Information Criterion (BIC).
         'FPE'   -  Final Prediction Error (FPE).
-        'LILC'  -  Khundrin's law ofiterated logarithm criterion (LILC).
+        'LILC'  -  Khundrin's law of iterated logarithm criterion (LILC).
+        'APRESS'- Adjustable Prediction Error Sum of Squares (paper eq. 9).
 
         Parameters
         ----------
@@ -515,8 +556,15 @@ class OFRBase(BaseMSS, metaclass=ABCMeta):
 
             tmp_yhat = np.dot(regressor_matrix, tmp_theta)
             tmp_residual = estimation_target - tmp_yhat
-            e_var = np.var(tmp_residual, ddof=1)
-            output_vector[i] = self.info_criteria_function(n_theta, n_samples, e_var)
+
+            if self.info_criteria == "apress":
+                mse = np.mean(np.square(tmp_residual))
+                output_vector[i] = apress(n_theta, n_samples, mse, self.apress_lambda)
+            else:
+                e_var = np.var(tmp_residual, ddof=1)
+                output_vector[i] = self.info_criteria_function(
+                    n_theta, n_samples, e_var
+                )
 
         return output_vector
 
@@ -577,7 +625,11 @@ class OFRBase(BaseMSS, metaclass=ABCMeta):
             self.info_values = self.information_criterion(reg_matrix, y)
 
         if self.n_terms is None and self.order_selection is True:
-            model_length = get_min_info_value(self.info_values)
+            if self.info_criteria == "apress":
+                # APRESS uses the minimizer of the criterion (eq. 10)
+                model_length = int(np.nanargmin(self.info_values)) + 1
+            else:
+                model_length = get_min_info_value(self.info_values)
             self.n_terms = model_length
         elif self.n_terms is None and self.order_selection is not True:
             raise ValueError(
