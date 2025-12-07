@@ -141,13 +141,13 @@ class RMSS(OFRBase):
         strategy to each dataset before scoring candidates (keeps parity with
         the small-sample discussion in the RMSS paper).
 
-        Notes
-        -----
-        - The implementation follows the same prediction and formatting interfaces
-            as other SysIdentPy MSS classes to remain drop-in compatible with
-            utilities such as ``equation_formatter``.
-        - Setting ``average_theta=False`` skips the per-sub-dataset averaging in
-            eq. (28) of the paper; keep it ``True`` for the canonical RMSS behaviour.
+    Notes
+    -----
+    - The implementation follows the same prediction and formatting interfaces
+        as other SysIdentPy MSS classes to remain drop-in compatible with
+        utilities such as ``equation_formatter``.
+    - Setting ``average_theta=False`` skips the per-sub-dataset averaging in
+        eq. (28) of the paper; keep it ``True`` for the canonical RMSS behaviour.
     """
 
     def __init__(
@@ -205,9 +205,6 @@ class RMSS(OFRBase):
 
         self._validate_rmss_params()
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
     def _validate_rmss_params(self):
         if self.resampling not in ["loo", "bootstrap"]:
             raise ValueError(f"Unsupported resampling strategy: {self.resampling}")
@@ -320,8 +317,7 @@ class RMSS(OFRBase):
     def _overall_error_multi(
         self, psi_list: List[np.ndarray], y_list: List[np.ndarray]
     ) -> np.ndarray:
-        """Compute aggregated error across multiple datasets using simple mean (eq.16)."""
-
+        """Compute aggregated error across multiple datasets using simple mean."""
         per_dataset = []
         for psi_k, y_k in zip(psi_list, y_list):
             if psi_k.ndim == 3:
@@ -465,9 +461,6 @@ class RMSS(OFRBase):
         target = self._default_estimation_target(y)
         return [reg_matrix], [target]
 
-    # ------------------------------------------------------------------
-    # Core MSS
-    # ------------------------------------------------------------------
     def run_mss_algorithm(
         self,
         psi: Union[np.ndarray, List[np.ndarray]],
@@ -577,9 +570,6 @@ class RMSS(OFRBase):
         psi_selected = reg_matrices[0][:, piv] if piv.size else reg_matrices[0][:, :0]
         return err, piv, psi_selected, targets[0]
 
-    # ------------------------------------------------------------------
-    # Estimation
-    # ------------------------------------------------------------------
     def _estimate_theta(
         self,
         reg_matrices: List[np.ndarray],
@@ -601,6 +591,7 @@ class RMSS(OFRBase):
                     "average_theta=False skips the per-subset averaging in eq.(28) "
                     "of the RMSS paper; use True to match the reference method.",
                     UserWarning,
+                    stacklevel=2
                 )
                 theta = self.estimator.optimize(psi, target)
             else:
@@ -631,6 +622,7 @@ class RMSS(OFRBase):
                 "Unbiased correction is not applied when fitting multiple datasets "
                 "with RMSS; results may differ from single-dataset unbiased fits.",
                 UserWarning,
+                stacklevel=2
             )
         thetas = []
         for reg_matrix, target in zip(reg_matrices, targets):
@@ -642,9 +634,6 @@ class RMSS(OFRBase):
         theta = np.mean(np.stack(thetas, axis=2), axis=2)
         return theta
 
-    # ------------------------------------------------------------------
-    # Order selection
-    # ------------------------------------------------------------------
     def information_criterion(
         self,
         x: Union[np.ndarray, List[np.ndarray]],
@@ -702,15 +691,11 @@ class RMSS(OFRBase):
 
                 output_vector[i] = float(np.mean(per_dataset_vals))
 
-            # preserve pivv for downstream fit when i matches chosen n_terms
             if i == self.n_info_values - 1:
                 self.pivv = piv
 
         return output_vector
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
     def fit(
         self, *, X: Optional[np.ndarray] = None, y: Union[np.ndarray, List[np.ndarray]]
     ):
