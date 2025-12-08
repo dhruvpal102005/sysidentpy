@@ -28,53 +28,25 @@ from __future__ import annotations
 import copy
 import warnings
 from itertools import repeat
-from typing import List, Optional, Tuple, Union
+from typing import List, Literal, Optional, Tuple, Union
 
 import numpy as np
 
 from ..basis_function import Fourier, Polynomial
-from ..utils.information_matrix import build_lagged_matrix
+from ..parameter_estimation.estimators import RecursiveLeastSquares
 from ..utils.check_arrays import num_features
-from .ofr_base import OFRBase, apress, get_min_info_value
-from ..parameter_estimation.estimators import (
-    LeastSquares,
-    RidgeRegression,
-    RecursiveLeastSquares,
-    TotalLeastSquares,
-    LeastMeanSquareMixedNorm,
-    LeastMeanSquares,
-    LeastMeanSquaresFourth,
-    LeastMeanSquaresLeaky,
-    LeastMeanSquaresNormalizedLeaky,
-    LeastMeanSquaresNormalizedSignRegressor,
-    LeastMeanSquaresNormalizedSignSign,
-    LeastMeanSquaresSignError,
-    LeastMeanSquaresSignSign,
-    AffineLeastMeanSquares,
-    NormalizedLeastMeanSquares,
-    NormalizedLeastMeanSquaresSignError,
-    LeastMeanSquaresSignRegressor,
-)
+from ..utils.information_matrix import build_lagged_matrix
+from .ofr_base import Estimators, OFRBase, apress, get_min_info_value
 
-Estimators = Union[
-    LeastSquares,
-    RidgeRegression,
-    RecursiveLeastSquares,
-    TotalLeastSquares,
-    LeastMeanSquareMixedNorm,
-    LeastMeanSquares,
-    LeastMeanSquaresFourth,
-    LeastMeanSquaresLeaky,
-    LeastMeanSquaresNormalizedLeaky,
-    LeastMeanSquaresNormalizedSignRegressor,
-    LeastMeanSquaresNormalizedSignSign,
-    LeastMeanSquaresSignError,
-    LeastMeanSquaresSignSign,
-    AffineLeastMeanSquares,
-    NormalizedLeastMeanSquares,
-    NormalizedLeastMeanSquaresSignError,
-    LeastMeanSquaresSignRegressor,
-]
+# Type aliases for RMSS-specific parameters
+ResamplingStrategy = Literal["loo", "bootstrap"]
+ErrorMeasure = Literal["mae", "mse", "phi3", "rmse_ratio"]
+ModelType = Literal["NARMAX", "NAR", "NFIR"]
+
+# Valid parameter sets for validation
+_VALID_RESAMPLING_STRATEGIES: frozenset[str] = frozenset({"loo", "bootstrap"})
+_VALID_ERROR_MEASURES: frozenset[str] = frozenset({"mae", "mse", "phi3", "rmse_ratio"})
+_DEPRECATED_ERROR_MEASURES: dict[str, str] = {"smape": "phi3"}
 
 
 class RMSS(OFRBase):
@@ -154,21 +126,21 @@ class RMSS(OFRBase):
     def __init__(
         self,
         *,
-        ylag: Union[int, list] = 2,
-        xlag: Union[int, list] = 2,
-        elag: Union[int, list] = 2,
+        ylag: Union[int, List[int]] = 2,
+        xlag: Union[int, List[int]] = 2,
+        elag: Union[int, List[int]] = 2,
         order_selection: bool = True,
         info_criteria: str = "apress",
-        n_terms: Union[int, None] = None,
+        n_terms: Optional[int] = None,
         n_info_values: int = 15,
         estimator: Optional[Estimators] = None,
         basis_function: Union[Polynomial, Fourier] = Polynomial(),
-        model_type: str = "NARMAX",
-        eps: np.float64 = np.finfo(np.float64).eps,
-        alpha: float = 0,
+        model_type: ModelType = "NARMAX",
+        eps: float = np.finfo(np.float64).eps,
+        alpha: float = 0.0,
         err_tol: Optional[float] = None,
-        resampling: str = "loo",
-        error_measure: str = "mae",
+        resampling: ResamplingStrategy = "loo",
+        error_measure: ErrorMeasure = "mae",
         average_theta: bool = True,
         apress_lambda: float = 1.0,
         n_subsets: Optional[int] = None,
@@ -208,43 +180,81 @@ class RMSS(OFRBase):
 
         self._validate_rmss_params()
 
-    def _validate_rmss_params(self):
-        if self.resampling not in ["loo", "bootstrap"]:
-            raise ValueError(f"Unsupported resampling strategy: {self.resampling}")
+    def _validate_rmss_params(self) -> None:
+        """Validate RMSS-specific parameters.
 
-        if self.error_measure == "smape":
-            warnings.warn(
-                "error_measure='smape' is deprecated; use 'phi3' (eq. 19) instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            self.error_measure = "phi3"
+        Raises
+        ------
+        ValueError
+            If resampling strategy or error measure is invalid, or if
+            bootstrap parameters are out of range.
+        TypeError
+            If boolean or integer parameters have wrong types.
+        """
+        self._validate_resampling_strategy()
+        self._validate_error_measure()
+        self._validate_boolean_params()
+        self._validate_bootstrap_params()
 
-        valid_measures = {"mae", "mse", "phi3", "rmse_ratio"}
-        if self.error_measure not in valid_measures:
+    def _validate_resampling_strategy(self) -> None:
+        """Validate resampling strategy parameter."""
+        if self.resampling not in _VALID_RESAMPLING_STRATEGIES:
+            valid_options = ", ".join(sorted(_VALID_RESAMPLING_STRATEGIES))
             raise ValueError(
-                "error_measure must be one of 'mae', 'mse', 'phi3', 'rmse_ratio'. "
-                f"Got {self.error_measure}"
+                f"Unsupported resampling strategy: '{self.resampling}'. "
+                f"Valid options are: {valid_options}."
             )
 
-        if not isinstance(self.average_theta, bool):
-            raise TypeError(
-                f"average_theta must be a boolean value. Got {type(self.average_theta)}"
+    def _validate_error_measure(self) -> None:
+        """Validate error measure parameter, handling deprecated aliases."""
+        if self.error_measure in _DEPRECATED_ERROR_MEASURES:
+            new_measure = _DEPRECATED_ERROR_MEASURES[self.error_measure]
+            warnings.warn(
+                f"error_measure='{self.error_measure}' is deprecated; "
+                f"use '{new_measure}' instead.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            self.error_measure = new_measure
+
+        if self.error_measure not in _VALID_ERROR_MEASURES:
+            valid_options = ", ".join(sorted(_VALID_ERROR_MEASURES))
+            raise ValueError(
+                f"error_measure must be one of: {valid_options}. "
+                f"Got '{self.error_measure}'."
             )
 
-        if self.resampling == "bootstrap":
-            if self.n_subsets is not None and self.n_subsets < 1:
-                raise ValueError("n_subsets must be a positive integer when provided.")
-            if self.subset_size is not None and self.subset_size < 1:
-                raise ValueError(
-                    "subset_size must be a positive integer when provided."
+    def _validate_boolean_params(self) -> None:
+        """Validate boolean parameters."""
+        bool_params = {
+            "average_theta": self.average_theta,
+            "multi_resampling": self.multi_resampling,
+        }
+        for name, value in bool_params.items():
+            if not isinstance(value, bool):
+                raise TypeError(
+                    f"{name} must be a boolean value. Got {type(value).__name__}."
                 )
-            if self.random_state is not None and not isinstance(self.random_state, int):
-                raise TypeError("random_state must be an integer when provided.")
 
-        if not isinstance(self.multi_resampling, bool):
+    def _validate_bootstrap_params(self) -> None:
+        """Validate bootstrap-specific parameters."""
+        if self.resampling != "bootstrap":
+            return
+
+        if self.n_subsets is not None and self.n_subsets < 1:
+            raise ValueError(
+                "n_subsets must be a positive integer when provided. "
+                f"Got {self.n_subsets}."
+            )
+        if self.subset_size is not None and self.subset_size < 1:
+            raise ValueError(
+                "subset_size must be a positive integer when provided. "
+                f"Got {self.subset_size}."
+            )
+        if self.random_state is not None and not isinstance(self.random_state, int):
             raise TypeError(
-                f"multi_resampling must be a boolean value. Got {type(self.multi_resampling)}"
+                "random_state must be an integer when provided. "
+                f"Got {type(self.random_state).__name__}."
             )
 
     def _create_sub_datasets(
@@ -287,9 +297,68 @@ class RMSS(OFRBase):
 
         raise ValueError(f"Unsupported resampling strategy: {self.resampling}")
 
+    def _compute_error_metric(
+        self,
+        errors: np.ndarray,
+        y_ref: np.ndarray,
+        preds: np.ndarray,
+        axis: int,
+    ) -> np.ndarray:
+        """Compute the selected error metric along the specified axis.
+
+        Parameters
+        ----------
+        errors : np.ndarray
+            Prediction errors (y - y_hat).
+        y_ref : np.ndarray
+            Reference output values (ground truth).
+        preds : np.ndarray
+            Model predictions.
+        axis : int
+            Axis along which to compute the metric.
+
+        Returns
+        -------
+        np.ndarray
+            Computed error metric values.
+        """
+        if self.error_measure == "mae":
+            return np.abs(errors).mean(axis=axis)
+
+        if self.error_measure == "mse":
+            return np.square(errors).mean(axis=axis)
+
+        if self.error_measure == "phi3":
+            numerator = np.abs(errors).sum(axis=axis)
+            denom = np.abs(y_ref).sum(axis=axis) + np.abs(preds).sum(axis=axis)
+            denom = np.where(np.abs(denom) < self.eps, self.eps, denom)
+            return numerator / denom
+
+        # rmse_ratio
+        rmse = np.sqrt(np.square(errors).mean(axis=axis))
+        y_rmse = np.sqrt(np.square(y_ref).mean(axis=axis))
+        pred_rmse = np.sqrt(np.square(preds).mean(axis=axis))
+        denom = y_rmse + pred_rmse
+        denom = np.where(np.abs(denom) < self.eps, self.eps, denom)
+        return rmse / denom
+
     def _overall_error(self, psi_views: np.ndarray, y_views: np.ndarray) -> np.ndarray:
-        """Compute aggregated error for each candidate across sub-datasets."""
-        # psi_views: (K, N', M), y_views: (K, N')
+        """Compute aggregated error for each candidate across sub-datasets.
+
+        Parameters
+        ----------
+        psi_views : np.ndarray
+            Resampled regressor views with shape (K, N', M) where K is the
+            number of sub-datasets, N' is the subset size, and M is the
+            number of candidate regressors.
+        y_views : np.ndarray
+            Resampled target views with shape (K, N').
+
+        Returns
+        -------
+        np.ndarray
+            Overall error for each candidate regressor (shape: M,).
+        """
         numerators = np.einsum("knm,kn->km", psi_views, y_views)
         denominators = np.einsum("knm,knm->km", psi_views, psi_views)
         denominators = np.where(np.abs(denominators) < self.eps, self.eps, denominators)
@@ -298,72 +367,86 @@ class RMSS(OFRBase):
         preds = psi_views * alphas[:, None, :]
         errors = y_views[:, :, None] - preds
 
-        if self.error_measure == "mae":
-            metric = np.abs(errors).mean(axis=1)
-        elif self.error_measure == "mse":
-            metric = np.square(errors).mean(axis=1)
-        elif self.error_measure == "phi3":
-            numerator = np.abs(errors).sum(axis=1)
-            denom = np.abs(y_views).sum(axis=1)[:, None] + np.abs(preds).sum(axis=1)
-            denom = np.where(np.abs(denom) < self.eps, self.eps, denom)
-            metric = numerator / denom
-        else:  # rmse_ratio
-            rmse = np.sqrt(np.square(errors).mean(axis=1))
-            denom = np.sqrt(np.square(y_views).mean(axis=1))[:, None] + np.sqrt(
-                np.square(preds).mean(axis=1)
-            )
-            denom = np.where(np.abs(denom) < self.eps, self.eps, denom)
-            metric = rmse / denom
+        # Expand y_views for metric computation: (K, N') -> (K, N', 1)
+        y_expanded = y_views[:, :, None]
+        metric = self._compute_error_metric(errors, y_expanded, preds, axis=1)
 
         return metric.mean(axis=0)
 
     def _overall_error_multi(
         self, psi_list: List[np.ndarray], y_list: List[np.ndarray]
     ) -> np.ndarray:
-        """Compute aggregated error across multiple datasets using simple mean."""
+        """Compute aggregated error across multiple datasets.
+
+        Parameters
+        ----------
+        psi_list : List[np.ndarray]
+            List of regressor matrices or resampled views per dataset.
+        y_list : List[np.ndarray]
+            List of target arrays or resampled target views per dataset.
+
+        Returns
+        -------
+        np.ndarray
+            Mean error across all datasets for each candidate.
+        """
         per_dataset = []
         for psi_k, y_k in zip(psi_list, y_list, strict=True):
             if psi_k.ndim == 3:
-                # Resampled views (K_k, N', M)
+                # Resampled views (K_k, N', M) - delegate to _overall_error
                 metric = self._overall_error(psi_k, y_k)
             else:
-                y_vec = y_k.reshape(-1)
-                numerators = psi_k.T @ y_vec
-                denominators = np.einsum("ij,ij->j", psi_k, psi_k)
-                denominators = np.where(
-                    np.abs(denominators) < self.eps, self.eps, denominators
-                )
-                alphas = numerators / denominators
-
-                preds = psi_k * alphas[None, :]
-                errors = y_vec[:, None] - preds
-
-                if self.error_measure == "mae":
-                    metric = np.abs(errors).mean(axis=0)
-                elif self.error_measure == "mse":
-                    metric = np.square(errors).mean(axis=0)
-                elif self.error_measure == "phi3":
-                    numerator = np.abs(errors).sum(axis=0)
-                    denom = np.abs(y_vec).sum(axis=0) + np.abs(preds).sum(axis=0)
-                    denom = np.where(np.abs(denom) < self.eps, self.eps, denom)
-                    metric = numerator / denom
-                else:
-                    rmse = np.sqrt(np.square(errors).mean(axis=0))
-                    denom = np.sqrt(np.square(y_k).mean(axis=0)) + np.sqrt(
-                        np.square(preds).mean(axis=0)
-                    )
-                    denom = np.where(np.abs(denom) < self.eps, self.eps, denom)
-                    metric = rmse / denom
-
+                metric = self._compute_2d_error(psi_k, y_k)
             per_dataset.append(metric)
 
-        stacked = np.stack(per_dataset, axis=0)
-        return np.mean(stacked, axis=0)
+        return np.mean(np.stack(per_dataset, axis=0), axis=0)
+
+    def _compute_2d_error(self, psi: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """Compute error metric for a 2D regressor matrix.
+
+        Parameters
+        ----------
+        psi : np.ndarray
+            Regressor matrix with shape (N, M).
+        y : np.ndarray
+            Target array with shape (N,) or (N, 1).
+
+        Returns
+        -------
+        np.ndarray
+            Error metric for each candidate (shape: M,).
+        """
+        y_vec = y.reshape(-1)
+        numerators = psi.T @ y_vec
+        denominators = np.einsum("ij,ij->j", psi, psi)
+        denominators = np.where(np.abs(denominators) < self.eps, self.eps, denominators)
+        alphas = numerators / denominators
+
+        preds = psi * alphas[None, :]
+        errors = y_vec[:, None] - preds
+
+        return self._compute_error_metric(errors, y_vec[:, None], preds, axis=0)
 
     def _orthogonalize_remaining_views(
         self, psi_views: np.ndarray, selected_q: np.ndarray
     ) -> np.ndarray:
-        """Orthogonalize remaining candidates for resampled views (K, N', M)."""
+        """Orthogonalize remaining candidates against the selected vector.
+
+        Applies Gram-Schmidt orthogonalization to remove the component of
+        each candidate regressor that lies along the selected vector.
+
+        Parameters
+        ----------
+        psi_views : np.ndarray
+            Resampled regressor views with shape (K, N', M).
+        selected_q : np.ndarray
+            Selected regressor vector with shape (K, N').
+
+        Returns
+        -------
+        np.ndarray
+            Orthogonalized regressor views with same shape as input.
+        """
         denom = np.einsum("kn,kn->k", selected_q, selected_q)
         denom = np.where(np.abs(denom) < self.eps, self.eps, denom)
 
@@ -371,22 +454,26 @@ class RMSS(OFRBase):
         coeff = projection / denom[:, None]
         return psi_views - selected_q[:, :, None] * coeff[:, None, :]
 
-    def _orthogonalize_remaining(
-        self, psi_views: np.ndarray, selected_q: np.ndarray
-    ) -> np.ndarray:
-        """Orthogonalize remaining candidates against the selected vector."""
-        denom = np.einsum("kn,kn->k", selected_q, selected_q)
-        denom = np.where(np.abs(denom) < self.eps, self.eps, denom)
-
-        projection = np.einsum("kn,knm->km", selected_q, psi_views)
-        coeff = projection / denom[:, None]
-        psi_views = psi_views - selected_q[:, :, None] * coeff[:, None, :]
-        return psi_views
+    # Alias for backward compatibility
+    _orthogonalize_remaining = _orthogonalize_remaining_views
 
     def _orthogonalize_matrix(
         self, psi_matrix: np.ndarray, selected_q: np.ndarray
     ) -> np.ndarray:
-        """Orthogonalize a 2D regressor matrix against the selected vector."""
+        """Orthogonalize a 2D regressor matrix against the selected vector.
+
+        Parameters
+        ----------
+        psi_matrix : np.ndarray
+            Regressor matrix with shape (N, M).
+        selected_q : np.ndarray
+            Selected regressor vector with shape (N,).
+
+        Returns
+        -------
+        np.ndarray
+            Orthogonalized regressor matrix with same shape as input.
+        """
         denom = np.dot(selected_q, selected_q)
         denom = self.eps if np.abs(denom) < self.eps else denom
         projection = psi_matrix.T @ selected_q
@@ -396,7 +483,20 @@ class RMSS(OFRBase):
     def _orthogonalize_remaining_multi(
         self, psi_list: List[np.ndarray], selected_q_list: List[np.ndarray]
     ) -> List[np.ndarray]:
-        """Orthogonalize remaining candidates for multiple datasets."""
+        """Orthogonalize remaining candidates for multiple 2D datasets.
+
+        Parameters
+        ----------
+        psi_list : List[np.ndarray]
+            List of regressor matrices, each with shape (N_k, M).
+        selected_q_list : List[np.ndarray]
+            List of selected regressor vectors, each with shape (N_k,).
+
+        Returns
+        -------
+        List[np.ndarray]
+            List of orthogonalized regressor matrices.
+        """
         return [
             self._orthogonalize_matrix(psi_k, q_k)
             for psi_k, q_k in zip(psi_list, selected_q_list, strict=True)
@@ -407,7 +507,29 @@ class RMSS(OFRBase):
         X: Optional[Union[np.ndarray, List[Optional[np.ndarray]]]],
         y: Union[np.ndarray, List[np.ndarray]],
     ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-        """Build regressor matrices/targets for single or multiple datasets."""
+        """Build regressor matrices and targets for single or multiple datasets.
+
+        Parameters
+        ----------
+        X : np.ndarray, List[np.ndarray], or None
+            Input data. Can be a single array, a list of arrays for multiple
+            datasets, or None for NAR models.
+        y : np.ndarray or List[np.ndarray]
+            Output data. Can be a single array or a list for multiple datasets.
+
+        Returns
+        -------
+        Tuple[List[np.ndarray], List[np.ndarray]]
+            A tuple containing:
+            - reg_matrices: List of regressor matrices.
+            - targets: List of target arrays.
+
+        Raises
+        ------
+        ValueError
+            If X and y lists have different lengths, or if datasets have
+            inconsistent input dimensions or regressor spaces.
+        """
         if isinstance(y, (list, tuple)):
             y_list = list(y)
             if X is None or isinstance(X, np.ndarray):
@@ -476,52 +598,145 @@ class RMSS(OFRBase):
         y: Union[np.ndarray, List[np.ndarray]],
         process_term_number: int,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Perform RMSS selection over single or multiple datasets."""
+        """Perform RMSS selection over single or multiple datasets.
+
+        This method implements the core RMSS algorithm, selecting regressors
+        one at a time based on their aggregated error across resampled
+        sub-datasets.
+
+        Parameters
+        ----------
+        psi : np.ndarray or List[np.ndarray]
+            Regressor matrix or list of matrices for multiple datasets.
+        y : np.ndarray or List[np.ndarray]
+            Target array or list of arrays for multiple datasets.
+        process_term_number : int
+            Maximum number of terms to select.
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+            - err: Array of error values for each selected term.
+            - piv: Array of selected regressor indices.
+            - psi_selected: Regressor matrix with only selected columns.
+            - target: Target array used for estimation.
+        """
         self.omae_history = []
 
-        if not isinstance(psi, list):
-            reg_matrices = [psi]
-            targets = [y]
-        else:
-            reg_matrices = psi
-            targets = y if isinstance(y, list) else [y]
+        reg_matrices, targets = self._normalize_inputs(psi, y)
 
         if len(reg_matrices) == 1:
-            psi = reg_matrices[0]
-            target = targets[0]
-            psi_views, y_views = self._create_sub_datasets(psi, target)
+            return self._run_single_dataset(
+                reg_matrices[0], targets[0], process_term_number
+            )
 
-            available_indices = np.arange(psi.shape[1])
-            selected_indices = []
-            err_trace = []
+        return self._run_multi_dataset(reg_matrices, targets, process_term_number)
 
-            current_views = psi_views
-            for _ in range(min(process_term_number, psi.shape[1])):
-                omae = self._overall_error(current_views, y_views)
-                self.omae_history.append(omae)
-                best_local_idx = int(np.argmin(omae))
-                selected_indices.append(int(available_indices[best_local_idx]))
-                err_trace.append(float(omae[best_local_idx]))
+    def _normalize_inputs(
+        self,
+        psi: Union[np.ndarray, List[np.ndarray]],
+        y: Union[np.ndarray, List[np.ndarray]],
+    ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+        """Normalize inputs to lists for consistent processing."""
+        if not isinstance(psi, list):
+            return [psi], [y]
+        targets = y if isinstance(y, list) else [y]
+        return psi, targets
 
-                if (self.err_tol is not None) and (np.sum(err_trace) >= self.err_tol):
-                    break
+    def _run_single_dataset(
+        self,
+        psi: np.ndarray,
+        target: np.ndarray,
+        process_term_number: int,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Run RMSS selection for a single dataset."""
+        psi_views, y_views = self._create_sub_datasets(psi, target)
 
-                selected_q = current_views[:, :, best_local_idx]
-                available_indices = np.delete(available_indices, best_local_idx)
-                current_views = np.delete(current_views, best_local_idx, axis=2)
+        available_indices = np.arange(psi.shape[1])
+        selected_indices: List[int] = []
+        err_trace: List[float] = []
 
-                if current_views.shape[2] == 0:
-                    break
-                current_views = self._orthogonalize_remaining(current_views, selected_q)
+        current_views = psi_views
+        max_terms = min(process_term_number, psi.shape[1])
 
-            piv = np.array(selected_indices, dtype=int)
-            err = np.array(err_trace, dtype=float)
-            psi_selected = psi[:, piv] if piv.size else psi[:, :0]
-            return err, piv, psi_selected, target
+        for _ in range(max_terms):
+            omae = self._overall_error(current_views, y_views)
+            self.omae_history.append(omae)
 
-        # Multiple independent datasets path
+            best_local_idx = int(np.argmin(omae))
+            selected_indices.append(int(available_indices[best_local_idx]))
+            err_trace.append(float(omae[best_local_idx]))
+
+            if self._should_stop_selection(err_trace):
+                break
+
+            selected_q = current_views[:, :, best_local_idx]
+            available_indices = np.delete(available_indices, best_local_idx)
+            current_views = np.delete(current_views, best_local_idx, axis=2)
+
+            if current_views.shape[2] == 0:
+                break
+
+            current_views = self._orthogonalize_remaining(current_views, selected_q)
+
+        return self._build_result(selected_indices, err_trace, psi, target)
+
+    def _run_multi_dataset(
+        self,
+        reg_matrices: List[np.ndarray],
+        targets: List[np.ndarray],
+        process_term_number: int,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Run RMSS selection for multiple datasets."""
+        psi_list, target_list = self._prepare_multi_dataset_views(reg_matrices, targets)
+
+        available_indices = np.arange(psi_list[0].shape[-1])
+        selected_indices: List[int] = []
+        err_trace: List[float] = []
+
+        current_views = psi_list
+        max_terms = min(process_term_number, psi_list[0].shape[-1])
+
+        for _ in range(max_terms):
+            omae = self._overall_error_multi(current_views, target_list)
+            self.omae_history.append(omae)
+
+            best_local_idx = int(np.argmin(omae))
+            selected_indices.append(int(available_indices[best_local_idx]))
+            err_trace.append(float(omae[best_local_idx]))
+
+            if self._should_stop_selection(err_trace):
+                break
+
+            updated_views, selected_q_list = self._extract_and_remove_selected(
+                current_views, best_local_idx
+            )
+            available_indices = np.delete(available_indices, best_local_idx)
+
+            if updated_views[0].shape[-1] == 0:
+                break
+
+            current_views = self._orthogonalize_multi_views(
+                updated_views, selected_q_list
+            )
+
+        return self._build_result(
+            selected_indices, err_trace, reg_matrices[0], targets[0]
+        )
+
+    def _should_stop_selection(self, err_trace: List[float]) -> bool:
+        """Check if selection should stop based on error tolerance."""
+        return self.err_tol is not None and np.sum(err_trace) >= self.err_tol
+
+    def _prepare_multi_dataset_views(
+        self,
+        reg_matrices: List[np.ndarray],
+        targets: List[np.ndarray],
+    ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+        """Prepare views for multi-dataset processing."""
         psi_list: List[np.ndarray] = []
         target_list: List[np.ndarray] = []
+
         for rm, tgt in zip(reg_matrices, targets, strict=True):
             if self.multi_resampling:
                 views, yv = self._create_sub_datasets(rm, tgt)
@@ -531,51 +746,55 @@ class RMSS(OFRBase):
                 psi_list.append(rm.copy())
                 target_list.append(tgt)
 
-        available_indices = np.arange(psi_list[0].shape[-1])
-        selected_indices: List[int] = []
-        err_trace: List[float] = []
+        return psi_list, target_list
 
-        current_views = psi_list
-        for _ in range(min(process_term_number, psi_list[0].shape[-1])):
-            omae = self._overall_error_multi(current_views, target_list)
-            self.omae_history.append(omae)
-            best_local_idx = int(np.argmin(omae))
-            selected_indices.append(int(available_indices[best_local_idx]))
-            err_trace.append(float(omae[best_local_idx]))
+    def _extract_and_remove_selected(
+        self,
+        views: List[np.ndarray],
+        best_idx: int,
+    ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+        """Extract selected regressors and remove them from views."""
+        selected_q_list: List[np.ndarray] = []
+        updated_views: List[np.ndarray] = []
 
-            if (self.err_tol is not None) and (np.sum(err_trace) >= self.err_tol):
-                break
+        for view in views:
+            if view.ndim == 3:
+                selected_q_list.append(view[:, :, best_idx])
+                updated_views.append(np.delete(view, best_idx, axis=2))
+            else:
+                selected_q_list.append(view[:, best_idx])
+                updated_views.append(np.delete(view, best_idx, axis=1))
 
-            selected_q_list = []
-            updated_views = []
+        return updated_views, selected_q_list
 
-            for view in current_views:
-                if view.ndim == 3:
-                    selected_q_list.append(view[:, :, best_local_idx])
-                    view_reduced = np.delete(view, best_local_idx, axis=2)
-                    updated_views.append(view_reduced)
-                else:
-                    selected_q_list.append(view[:, best_local_idx])
-                    updated_views.append(np.delete(view, best_local_idx, axis=1))
+    def _orthogonalize_multi_views(
+        self,
+        views: List[np.ndarray],
+        selected_q_list: List[np.ndarray],
+    ) -> List[np.ndarray]:
+        """Orthogonalize views against selected regressors."""
+        new_views: List[np.ndarray] = []
 
-            available_indices = np.delete(available_indices, best_local_idx)
+        for view, q in zip(views, selected_q_list, strict=True):
+            if view.ndim == 3:
+                new_views.append(self._orthogonalize_remaining_views(view, q))
+            else:
+                new_views.append(self._orthogonalize_matrix(view, q))
 
-            if updated_views[0].shape[-1] == 0:
-                break
+        return new_views
 
-            new_views = []
-            for view, q in zip(updated_views, selected_q_list, strict=True):
-                if view.ndim == 3:
-                    new_views.append(self._orthogonalize_remaining_views(view, q))
-                else:
-                    new_views.append(self._orthogonalize_matrix(view, q))
-
-            current_views = new_views
-
+    def _build_result(
+        self,
+        selected_indices: List[int],
+        err_trace: List[float],
+        psi: np.ndarray,
+        target: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Build the result tuple from selection data."""
         piv = np.array(selected_indices, dtype=int)
         err = np.array(err_trace, dtype=float)
-        psi_selected = reg_matrices[0][:, piv] if piv.size else reg_matrices[0][:, :0]
-        return err, piv, psi_selected, targets[0]
+        psi_selected = psi[:, piv] if piv.size else psi[:, :0]
+        return err, piv, psi_selected, target
 
     def _estimate_theta(
         self,
@@ -583,6 +802,27 @@ class RMSS(OFRBase):
         targets: List[np.ndarray],
         piv: Optional[np.ndarray] = None,
     ) -> np.ndarray:
+        """Estimate model parameters using the selected regressors.
+
+        For a single dataset with ``average_theta=True``, parameters are
+        estimated on each resampled sub-dataset and averaged (eq. 28 in the
+        RMSS paper). For multiple datasets, parameters are averaged across
+        all datasets.
+
+        Parameters
+        ----------
+        reg_matrices : List[np.ndarray]
+            List of regressor matrices.
+        targets : List[np.ndarray]
+            List of target arrays.
+        piv : np.ndarray, optional
+            Indices of selected regressors. If None, uses ``self.pivv``.
+
+        Returns
+        -------
+        np.ndarray
+            Estimated parameter vector with shape (n_terms, 1).
+        """
         piv = self.pivv if piv is None else piv
         if piv is None or len(piv) == 0:
             return np.empty((0, 1))
@@ -646,7 +886,23 @@ class RMSS(OFRBase):
         x: Union[np.ndarray, List[np.ndarray]],
         y: Union[np.ndarray, List[np.ndarray]],
     ) -> np.ndarray:
-        """Compute information criteria using robust parameter estimation."""
+        """Compute information criteria using robust parameter estimation.
+
+        Evaluates models of increasing complexity (1 to ``n_info_values``
+        terms) and returns the information criterion value for each.
+
+        Parameters
+        ----------
+        x : np.ndarray or List[np.ndarray]
+            Regressor matrix or list of matrices.
+        y : np.ndarray or List[np.ndarray]
+            Target array or list of arrays.
+
+        Returns
+        -------
+        np.ndarray
+            Information criterion values for each model size.
+        """
         reg_matrices = x if isinstance(x, list) else [x]
         targets = y if isinstance(y, list) else [y]
 
@@ -703,7 +959,28 @@ class RMSS(OFRBase):
 
     def fit(
         self, *, X: Optional[np.ndarray] = None, y: Union[np.ndarray, List[np.ndarray]]
-    ):
+    ) -> "RMSS":
+        """Fit the RMSS model to the data.
+
+        Parameters
+        ----------
+        X : np.ndarray, optional
+            Input data with shape (n_samples, n_inputs). Can be None for
+            NAR models.
+        y : np.ndarray or List[np.ndarray]
+            Output data with shape (n_samples, 1). Can be a list for
+            fitting with multiple datasets.
+
+        Returns
+        -------
+        self : RMSS
+            The fitted model instance.
+
+        Raises
+        ------
+        ValueError
+            If y is None or if order_selection is False without n_terms.
+        """
         if y is None:
             raise ValueError("y cannot be None")
 
@@ -761,6 +1038,25 @@ class RMSS(OFRBase):
         steps_ahead: Optional[int] = None,
         forecast_horizon: Optional[int] = None,
     ) -> np.ndarray:
+        """Predict using the fitted RMSS model.
+
+        Parameters
+        ----------
+        X : np.ndarray, optional
+            Input data for prediction. Can be None for NAR models.
+        y : np.ndarray
+            Output data with initial conditions for prediction.
+        steps_ahead : int, optional
+            Number of steps ahead for multi-step prediction. If None,
+            performs free-run simulation.
+        forecast_horizon : int, optional
+            Number of samples to forecast beyond the input data.
+
+        Returns
+        -------
+        np.ndarray
+            Predicted output values.
+        """
         return super().predict(
             X=X, y=y, steps_ahead=steps_ahead, forecast_horizon=forecast_horizon
         )
