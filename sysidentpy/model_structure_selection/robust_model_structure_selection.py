@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import copy
 import warnings
+from itertools import repeat
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
@@ -101,8 +102,8 @@ class RMSS(OFRBase):
         Number of terms to select. Required when ``order_selection`` is False.
     n_info_values : int, default=15
         Maximum number of terms evaluated by the information criterion.
-    estimator : Estimators, default=RecursiveLeastSquares()
-        Parameter estimator.
+    estimator : Estimators, optional
+        Parameter estimator. Defaults to ``RecursiveLeastSquares()`` when not provided.
     basis_function : Polynomial or Fourier, default=Polynomial()
         Basis function generator.
     model_type : {'NARMAX','NAR','NFIR'}, default='NARMAX'
@@ -160,7 +161,7 @@ class RMSS(OFRBase):
         info_criteria: str = "apress",
         n_terms: Union[int, None] = None,
         n_info_values: int = 15,
-        estimator: Estimators = RecursiveLeastSquares(),
+        estimator: Optional[Estimators] = None,
         basis_function: Union[Polynomial, Fourier] = Polynomial(),
         model_type: str = "NARMAX",
         eps: np.float64 = np.finfo(np.float64).eps,
@@ -185,6 +186,8 @@ class RMSS(OFRBase):
         self.omae_history: List[np.ndarray] = []
         self._reg_matrices: List[np.ndarray] = []
         self._targets: List[np.ndarray] = []
+
+        estimator = RecursiveLeastSquares() if estimator is None else estimator
 
         super().__init__(
             ylag=ylag,
@@ -319,7 +322,7 @@ class RMSS(OFRBase):
     ) -> np.ndarray:
         """Compute aggregated error across multiple datasets using simple mean."""
         per_dataset = []
-        for psi_k, y_k in zip(psi_list, y_list):
+        for psi_k, y_k in zip(psi_list, y_list, strict=True):
             if psi_k.ndim == 3:
                 # Resampled views (K_k, N', M)
                 metric = self._overall_error(psi_k, y_k)
@@ -344,7 +347,7 @@ class RMSS(OFRBase):
                     denom = np.abs(y_vec).sum(axis=0) + np.abs(preds).sum(axis=0)
                     denom = np.where(np.abs(denom) < self.eps, self.eps, denom)
                     metric = numerator / denom
-                else:  # rmse_ratio
+                else:
                     rmse = np.sqrt(np.square(errors).mean(axis=0))
                     denom = np.sqrt(np.square(y_k).mean(axis=0)) + np.sqrt(
                         np.square(preds).mean(axis=0)
@@ -380,18 +383,24 @@ class RMSS(OFRBase):
         psi_views = psi_views - selected_q[:, :, None] * coeff[:, None, :]
         return psi_views
 
+    def _orthogonalize_matrix(
+        self, psi_matrix: np.ndarray, selected_q: np.ndarray
+    ) -> np.ndarray:
+        """Orthogonalize a 2D regressor matrix against the selected vector."""
+        denom = np.dot(selected_q, selected_q)
+        denom = self.eps if np.abs(denom) < self.eps else denom
+        projection = psi_matrix.T @ selected_q
+        coeff = projection / denom
+        return psi_matrix - np.outer(selected_q, coeff)
+
     def _orthogonalize_remaining_multi(
         self, psi_list: List[np.ndarray], selected_q_list: List[np.ndarray]
     ) -> List[np.ndarray]:
         """Orthogonalize remaining candidates for multiple datasets."""
-        updated = []
-        for psi_k, q_k in zip(psi_list, selected_q_list):
-            denom = np.dot(q_k, q_k)
-            denom = self.eps if np.abs(denom) < self.eps else denom
-            projection = psi_k.T @ q_k
-            coeff = projection / denom
-            updated.append(psi_k - np.outer(q_k, coeff))
-        return updated
+        return [
+            self._orthogonalize_matrix(psi_k, q_k)
+            for psi_k, q_k in zip(psi_list, selected_q_list, strict=True)
+        ]
 
     def _prepare_datasets(
         self,
@@ -402,7 +411,7 @@ class RMSS(OFRBase):
         if isinstance(y, (list, tuple)):
             y_list = list(y)
             if X is None or isinstance(X, np.ndarray):
-                X_list = [X for _ in y_list]
+                X_list = list(repeat(X, len(y_list)))
             else:
                 X_list = list(X)
             if len(X_list) != len(y_list):
@@ -412,7 +421,7 @@ class RMSS(OFRBase):
             targets: List[np.ndarray] = []
             self.n_inputs = None
 
-            for Xi, yi in zip(X_list, y_list):
+            for Xi, yi in zip(X_list, y_list, strict=True):
                 lagged_data = build_lagged_matrix(
                     Xi, yi, self.xlag, self.ylag, self.model_type
                 )
@@ -513,7 +522,7 @@ class RMSS(OFRBase):
         # Multiple independent datasets path
         psi_list: List[np.ndarray] = []
         target_list: List[np.ndarray] = []
-        for rm, tgt in zip(reg_matrices, targets):
+        for rm, tgt in zip(reg_matrices, targets, strict=True):
             if self.multi_resampling:
                 views, yv = self._create_sub_datasets(rm, tgt)
                 psi_list.append(views)
@@ -555,13 +564,11 @@ class RMSS(OFRBase):
                 break
 
             new_views = []
-            for view, q in zip(updated_views, selected_q_list):
+            for view, q in zip(updated_views, selected_q_list, strict=True):
                 if view.ndim == 3:
                     new_views.append(self._orthogonalize_remaining_views(view, q))
                 else:
-                    new_views.append(
-                        self._orthogonalize_remaining_multi([view], [q])[0]
-                    )
+                    new_views.append(self._orthogonalize_matrix(view, q))
 
             current_views = new_views
 
@@ -591,7 +598,7 @@ class RMSS(OFRBase):
                     "average_theta=False skips the per-subset averaging in eq.(28) "
                     "of the RMSS paper; use True to match the reference method.",
                     UserWarning,
-                    stacklevel=2
+                    stacklevel=2,
                 )
                 theta = self.estimator.optimize(psi, target)
             else:
@@ -622,10 +629,10 @@ class RMSS(OFRBase):
                 "Unbiased correction is not applied when fitting multiple datasets "
                 "with RMSS; results may differ from single-dataset unbiased fits.",
                 UserWarning,
-                stacklevel=2
+                stacklevel=2,
             )
         thetas = []
-        for reg_matrix, target in zip(reg_matrices, targets):
+        for reg_matrix, target in zip(reg_matrices, targets, strict=True):
             psi_sel = _select_columns(reg_matrix)
             est_copy = copy.deepcopy(self.estimator)
             theta_k = est_copy.optimize(psi_sel, target)
@@ -643,16 +650,14 @@ class RMSS(OFRBase):
         reg_matrices = x if isinstance(x, list) else [x]
         targets = y if isinstance(y, list) else [y]
 
-        if (
-            self.n_info_values is not None
-            and self.n_info_values > reg_matrices[0].shape[1]
-        ):
-            self.n_info_values = reg_matrices[0].shape[1]
+        n_info_values = self.n_info_values or reg_matrices[0].shape[1]
+        n_info_values = min(n_info_values, reg_matrices[0].shape[1])
+        self.n_info_values = n_info_values
 
-        output_vector = np.zeros(self.n_info_values)
+        output_vector = np.zeros(n_info_values)
         output_vector[:] = np.nan
 
-        for i in range(self.n_info_values):
+        for i in range(n_info_values):
             n_theta = i + 1
             _, piv, _, _ = self.run_mss_algorithm(reg_matrices, targets, n_theta)
 
@@ -676,7 +681,7 @@ class RMSS(OFRBase):
                     )
             else:
                 per_dataset_vals = []
-                for rm, tgt in zip(reg_matrices, targets):
+                for rm, tgt in zip(reg_matrices, targets, strict=True):
                     psi_sel = rm[:, piv]
                     yhat = np.dot(psi_sel, tmp_theta)
                     residual = tgt - yhat
@@ -691,7 +696,7 @@ class RMSS(OFRBase):
 
                 output_vector[i] = float(np.mean(per_dataset_vals))
 
-            if i == self.n_info_values - 1:
+            if i == n_info_values - 1:
                 self.pivv = piv
 
         return output_vector
