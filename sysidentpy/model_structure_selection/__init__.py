@@ -8,3 +8,4 @@ from .accelerated_orthogonal_least_squares import AOLS
 from .meta_model_structure_selection import MetaMSS
 from .entropic_regression import ER
 from .sobolev_orthogonal_forward_regression import UOFR
+from .orthogonal_floating_search import OSF, OIF, OOS, O2S
