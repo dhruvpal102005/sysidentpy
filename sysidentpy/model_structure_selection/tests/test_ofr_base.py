@@ -94,7 +94,10 @@ def test_ofrbase_initialization_invalid_info_criteria():
     """Test initialization of OFRBase with an invalid info_criteria."""
     with pytest.raises(
         ValueError,
-        match="info_criteria must be aic, bic, fpe or lilc. Got invalid_criteria",
+        match=(
+            r"info_criteria must be aic, aicc, bic, fpe, lilc or apress. "
+            r"Got invalid_criteria"
+        ),
     ):
         TestOFRBase(
             ylag=2,

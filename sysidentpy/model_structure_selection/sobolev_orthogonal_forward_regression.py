@@ -268,6 +268,7 @@ class UOFR(OFRBase):
         eps: np.float64 = np.finfo(np.float64).eps,
         alpha: float = 0,
         err_tol: Optional[float] = None,
+        apress_lambda: float = 1.0,
         sobolev_order: int = 2,
         test_support: int = 11,
         modulating_function: Union[
@@ -280,7 +281,8 @@ class UOFR(OFRBase):
         self.xlag = xlag
         self.max_lag = self._get_max_lag()
         self.info_criteria = info_criteria
-        self.info_criteria_function = get_info_criteria(info_criteria)
+        self.apress_lambda = apress_lambda
+        self.info_criteria_function = get_info_criteria(info_criteria, apress_lambda)
         self.n_info_values = n_info_values
         self.n_terms = n_terms
         self.estimator = estimator
