@@ -613,6 +613,158 @@ def test_oos_down_and_up_swings_improve(monkeypatch):
     assert piv.size >= 0
 
 
+def test_subset_err_handles_zero_columns():
+    model = OSF()
+    psi = np.zeros((0, 1))
+    target = np.zeros((0, 1))
+    sqy = model._compute_squared_y(target)
+
+    score, err_vals = model._subset_err(psi, target, [0], sqy)
+    assert score == 0.0
+    assert err_vals.size == 0
+
+
+def test_down_swing_insufficient_most_significant_terms(monkeypatch):
+    model = OOS()
+    psi = np.eye(1)
+    target = np.ones((1, 1))
+    sqy = model._compute_squared_y(target)
+
+    monkeypatch.setattr(
+        model,
+        "_select_least_significant_subset",
+        lambda *args, **kwargs: [0],
+    )
+    monkeypatch.setattr(
+        model,
+        "_select_most_significant_subset",
+        lambda *args, **kwargs: [],
+    )
+
+    subset, score, improved, failed = model._down_swing(
+        psi,
+        target,
+        [0],
+        0.5,
+        1,
+        sqy,
+        [0],
+        {0},
+    )
+    assert subset == [0]
+    assert score == 0.5
+    assert not improved
+    assert failed
+
+
+def test_up_swing_insufficient_removal(monkeypatch):
+    model = OOS()
+    psi = np.eye(2)
+    target = np.ones((2, 1))
+    sqy = model._compute_squared_y(target)
+
+    monkeypatch.setattr(
+        model,
+        "_select_most_significant_subset",
+        lambda *args, **kwargs: [1],
+    )
+    monkeypatch.setattr(
+        model,
+        "_select_least_significant_subset",
+        lambda *args, **kwargs: [],
+    )
+
+    subset, score, improved, failed = model._up_swing(
+        psi,
+        target,
+        [0],
+        0.5,
+        1,
+        sqy,
+        2,
+        [0, 1],
+        {0, 1},
+    )
+    assert subset == [0]
+    assert score == 0.5
+    assert not improved
+    assert failed
+
+
+def test_oos_run_mss_increments_depth_on_two_failures(monkeypatch):
+    model = OOS(max_search_depth=2)
+    psi = np.ones((1, 1))
+    y = np.ones((model.max_lag + 1, 1))
+
+    add_iter = iter([0, None])
+
+    depth_calls = []
+
+    def fake_best_addition(*args, **kwargs):
+        idx = next(add_iter, None)
+        return (idx, 0.0) if idx is not None else (None, 0.0)
+
+    monkeypatch.setattr(model, "_best_addition", fake_best_addition)
+    monkeypatch.setattr(
+        model,
+        "_down_swing",
+        lambda *args, **kwargs: (
+            depth_calls.append(args[4]) or args[2],
+            args[3],
+            False,
+            True,
+        ),
+    )
+    monkeypatch.setattr(
+        model,
+        "_up_swing",
+        lambda *args, **kwargs: (
+            depth_calls.append(args[4]) or args[2],
+            args[3],
+            False,
+            True,
+        ),
+    )
+
+    err, piv, psi_sel, _ = model.run_mss_algorithm(psi, y, 1)
+    assert err.size == piv.size == psi_sel.shape[1]
+    assert depth_calls[:2] == [1, 1]
+    assert depth_calls[-2:] == [2, 2]
+
+
+def test_down_swing_depth_greater_than_subset(monkeypatch):
+    model = OOS()
+    psi = np.eye(1)
+    target = np.ones((1, 1))
+    sqy = model._compute_squared_y(target)
+
+    monkeypatch.setattr(
+        model,
+        "_select_least_significant_subset",
+        lambda *args, **kwargs: [0],
+    )
+    monkeypatch.setattr(
+        model,
+        "_select_most_significant_subset",
+        lambda *args, **kwargs: [],
+    )
+
+    subset, score, improved, failed = model._down_swing(
+        psi,
+        target,
+        [0],
+        0.5,
+        2,
+        sqy,
+        [0],
+        {0},
+    )
+    assert subset == [0]
+    assert score == 0.5
+    assert not improved
+    assert failed
+
+
 def test_oos_respects_max_search_depth(monkeypatch):
     model = OOS(
         n_terms=2,
