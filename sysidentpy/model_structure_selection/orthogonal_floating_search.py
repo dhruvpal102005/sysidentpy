@@ -67,13 +67,7 @@ class _OrthogonalFloatingBase(OFRBase):
         subset: List[int],
         squared_y: float,
     ) -> Tuple[float, np.ndarray]:
-        """Compute ERR score for a given subset (Eq. 4–5).
-
-        The ERR of each selected regressor is computed in an orthonormal
-        basis obtained via QR. The returned score is the sum of ERRs,
-        matching J(·) in Definition 5.
-        """
-
+        """Return ERR score and per-term ERRs for the given subset."""
         if not subset:
             return 0.0, np.array([], dtype=float)
 
@@ -94,7 +88,6 @@ class _OrthogonalFloatingBase(OFRBase):
 
     def _compute_squared_y(self, target: np.ndarray) -> float:
         """Compute ||y||^2 with numerical floor to avoid division by zero."""
-
         squared_y = float(np.dot(target.T, target).item())
         return squared_y if squared_y > self.eps else float(self.eps)
 
@@ -108,7 +101,6 @@ class _OrthogonalFloatingBase(OFRBase):
         squared_y: float,
     ) -> Tuple[Optional[int], float]:
         """Pick the most significant term (Definition 1)."""
-
         best_idx: Optional[int] = None
         best_score = -np.inf
         for idx in available:
@@ -128,7 +120,6 @@ class _OrthogonalFloatingBase(OFRBase):
         squared_y: float,
     ) -> Tuple[int, float]:
         """Pick the least significant term (Definition 2)."""
-
         best_idx = subset[0]
         best_score = -np.inf
         for idx in subset:
@@ -148,8 +139,7 @@ class _OrthogonalFloatingBase(OFRBase):
         count: int,
         squared_y: float,
     ) -> List[int]:
-        """Exhaustive selection of the most significant ``count``-subset (Definition 3)."""
-
+        """Select the most significant ``count``-subset (Definition 3)."""
         k = min(count, len(available))
         if k <= 0:
             return []
@@ -176,8 +166,7 @@ class _OrthogonalFloatingBase(OFRBase):
         count: int,
         squared_y: float,
     ) -> List[int]:
-        """Exhaustive removal of the least significant ``count``-subset (Definition 4)."""
-
+        """Remove the least significant ``count``-subset (Definition 4)."""
         k = min(count, len(subset))
         if k <= 0:
             return []
@@ -206,14 +195,11 @@ class _OrthogonalFloatingBase(OFRBase):
         count: int,
         squared_y: float,
     ) -> List[int]:
-        """Floating forward search (OSF-style) to pick ``count`` terms.
+        """Floating forward search to pick ``count`` terms (OSF-style).
 
-        This mirrors the bottom-up floating strategy but constrains the search
-        to adding terms on top of a fixed ``base_subset``. Backtracking only
-        removes terms that were added in this routine, never those in
-        ``base_subset``.
+        Constrains additions to build upon ``base_subset`` and backtracks only
+        terms added in this routine, never those in ``base_subset``.
         """
-
         if count <= 0 or not available:
             return []
 
@@ -303,11 +289,9 @@ class _OrthogonalFloatingBase(OFRBase):
     ) -> List[int]:
         """Sequential backward floating-style removal of ``count`` terms.
 
-        Uses repeated evaluation of the removal that maximizes the resulting
-        criterion. Backtracking avoids undoing the first removal when it is the
-        most recent change, mirroring the OSF safeguard.
+        Evaluates removals that maximize the criterion. Backtracking avoids
+        undoing the first removal when it is the most recent change.
         """
-
         if count <= 0 or len(base_subset) == 0:
             return []
 
@@ -384,7 +368,6 @@ class _OrthogonalFloatingBase(OFRBase):
         last_added: Optional[int],
     ) -> Tuple[List[int], float]:
         """Adaptive backward step used by OSF/OIF."""
-
         flag_first_removal = 1
         while len(subset) > 2:
             ls_idx, ls_score = self._best_removal(psi, target, subset, squared_y)
@@ -412,7 +395,6 @@ class _OrthogonalFloatingBase(OFRBase):
         swap_callback=None,
     ) -> List[int]:
         """Shared floating forward search used by OSF and OIF."""
-
         total_terms = psi.shape[1]
         all_indices = list(range(total_terms))
 
@@ -484,17 +466,31 @@ class _OrthogonalFloatingBase(OFRBase):
 
 
 class OSF(_OrthogonalFloatingBase):
-    """Orthogonal Sequential Floating search (paper Section 3.2).
+    """Orthogonal Sequential Floating search (Section 3.2 of the OFSA paper).
 
-    Iteratively adds and conditionally removes regressors based on the ERR
-    criterion. Preserves API compatibility with other model structure selection
-    classes; the constructor mirrors ``OFRBase`` arguments.
+    Iteratively adds regressors using ERR and backtracks to drop weak terms.
+    Keeps the same constructor surface as other SysIdentPy MSS classes.
     """
 
     def run_mss_algorithm(
         self, psi: np.ndarray, y: np.ndarray, process_term_number: int
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Execute the OSF search and return ERR values and selected pivots."""
+        """Run OSF and return (err_vals, piv, psi_selected, target).
+
+        Parameters
+        ----------
+        psi : np.ndarray
+            Candidate regressor matrix with shape (n_samples, n_terms).
+        y : np.ndarray
+            Output signal aligned with ``psi``.
+        process_term_number : int
+            Maximum number of terms to select.
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+            ``(err_vals, piv, psi_selected, target)`` matching the MSS API.
+        """
         target = self._default_estimation_target(y)
         squared_y = self._compute_squared_y(target)
         subset = self._floating_forward_search(
@@ -508,16 +504,31 @@ class OSF(_OrthogonalFloatingBase):
 
 
 class OIF(OSF):
-    """Orthogonal Improved Floating search (paper Section 3.3).
+    """Orthogonal Improved Floating search (Section 3.3 of the OFSA paper).
 
-    Extends ``OSF`` with a swapping step that replaces weak terms with more
-    significant candidates when it improves the ERR score.
+    Extends OSF with a swap step that replaces weak terms with better ones
+    when the ERR score increases.
     """
 
     def run_mss_algorithm(
         self, psi: np.ndarray, y: np.ndarray, process_term_number: int
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Execute the OIF search and return ERR values and selected pivots."""
+        """Run OIF and return (err_vals, piv, psi_selected, target).
+
+        Parameters
+        ----------
+        psi : np.ndarray
+            Candidate regressor matrix with shape (n_samples, n_terms).
+        y : np.ndarray
+            Output signal aligned with ``psi``.
+        process_term_number : int
+            Maximum number of terms to select.
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+            ``(err_vals, piv, psi_selected, target)`` matching the MSS API.
+        """
         target = self._default_estimation_target(y)
         squared_y = self._compute_squared_y(target)
         subset = self._floating_forward_search(
@@ -575,8 +586,8 @@ class OOS(_OrthogonalFloatingBase):
     """Orthogonal Oscillating Search (paper Section 3.4).
 
     This class is named ``OOS`` (Orthogonal Oscillating Search) to avoid
-    the caret notation ``O^2S`` in code. It corresponds to the same method
-    described as O²S in the paper.
+    the caret notation ``O^2S`` in code. It corresponds to the method
+    described as O2S in the paper.
     """
 
     def __init__(
@@ -621,14 +632,15 @@ class OOS(_OrthogonalFloatingBase):
         if self.max_search_depth is None:
             return
         if not isinstance(self.max_search_depth, int) or self.max_search_depth < 1:
-            raise ValueError(
+            msg = (
                 "max_search_depth must be a positive int or None; "
-                f"got {self.max_search_depth!r} (type={type(self.max_search_depth).__name__})"
+                f"got {self.max_search_depth!r} "
+                f"(type={type(self.max_search_depth).__name__})"
             )
+            raise ValueError(msg)
 
     def _resolve_search_depth(self, process_term_number: int, total_terms: int) -> int:
         """Choose search depth per OFSA guideline (25% of the smaller side)."""
-
         if self.max_search_depth is not None:
             return self.max_search_depth
 
@@ -650,7 +662,6 @@ class OOS(_OrthogonalFloatingBase):
         all_indices_set: set,
     ) -> Tuple[List[int], float, bool, bool]:
         """Perform a down swing (remove then add) returning updated state."""
-
         if len(subset) < depth:
             return subset, current_score, False, True
 
@@ -701,7 +712,6 @@ class OOS(_OrthogonalFloatingBase):
         all_indices_set: set,
     ) -> Tuple[List[int], float, bool, bool]:
         """Perform an up swing (add then remove) returning updated state."""
-
         if len(subset) + depth > total_terms:
             return subset, current_score, False, True
 
@@ -741,7 +751,22 @@ class OOS(_OrthogonalFloatingBase):
     def run_mss_algorithm(
         self, psi: np.ndarray, y: np.ndarray, process_term_number: int
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Execute the oscillating search with alternating down/up swings."""
+        """Run oscillating search and return (err_vals, piv, psi_selected, target).
+
+        Parameters
+        ----------
+        psi : np.ndarray
+            Candidate regressor matrix with shape (n_samples, n_terms).
+        y : np.ndarray
+            Output signal aligned with ``psi``.
+        process_term_number : int
+            Maximum number of terms to select.
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+            ``(err_vals, piv, psi_selected, target)`` matching the MSS API.
+        """
         target = self._default_estimation_target(y)
         squared_y = self._compute_squared_y(target)
         total_terms = psi.shape[1]
@@ -823,4 +848,4 @@ class OOS(_OrthogonalFloatingBase):
 # Alias matching the notation O²S used in the paper.
 O2S = OOS
 
-__all__ = ["OSF", "OIF", "OOS", "O2S"]
+__all__ = ["O2S", "OIF", "OOS", "OSF"]
