@@ -73,6 +73,24 @@ def test_subset_err_empty_and_nonempty():
     assert_equal(err_full.tolist(), [1.0, 0.0, 0.0])
 
 
+def test_subset_err_zero_pads_when_more_terms_than_samples():
+    model = OSF(
+        n_terms=3,
+        order_selection=False,
+        ylag=1,
+        xlag=1,
+        basis_function=Polynomial(degree=1),
+        estimator=LeastSquares(),
+    )
+    psi = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    target = np.array([[1.0], [0.0]])
+    sqy = model._compute_squared_y(target)
+    score, err = model._subset_err(psi, target, [0, 1, 2], sqy)
+    assert_equal(err.shape[0], 3)
+    assert err[2] == 0.0
+    assert score == pytest.approx(1.0)
+
+
 def test_best_addition_and_removal_ties():
     model, psi, target, sqy = _make_base()
     # tie on addition: target = [1,1,0]
@@ -290,6 +308,27 @@ def test_select_least_significant_subset_else_and_backtrack(monkeypatch):
 
     with pytest.raises(StopSearch):
         model._select_least_significant_subset(psi, target, base_subset, 2, 1.0)
+
+
+def test_select_least_significant_subset_uses_removed_list(monkeypatch):
+    model, psi, target, _ = _make_base()
+    base_subset = [0, 1]
+
+    call_count = {"count": 0}
+
+    def fake_subset_err(psi_arr, tgt, subset, sqy):
+        call_count["count"] += 1
+        if call_count["count"] == 1:
+            return 0.0, np.array(subset, dtype=float)
+        return -1.0, np.array(subset, dtype=float)
+
+    monkeypatch.setattr(model, "_subset_err", fake_subset_err)
+    monkeypatch.setattr(
+        model, "_best_removal", lambda psi_arr, tgt, subset, sqy: (subset[0], 0.0)
+    )
+
+    removed = model._select_least_significant_subset(psi, target, base_subset, 1, 1.0)
+    assert_equal(removed, [0])
 
 
 def test_osf_run_mss_respects_stored_subset(monkeypatch):
@@ -572,3 +611,100 @@ def test_oos_down_and_up_swings_improve(monkeypatch):
     err, piv, psi_sel, _ = model.run_mss_algorithm(psi, y, 1)
     assert err.size >= 0
     assert piv.size >= 0
+
+
+def test_oos_respects_max_search_depth(monkeypatch):
+    model = OOS(
+        n_terms=2,
+        order_selection=False,
+        ylag=1,
+        xlag=1,
+        basis_function=Polynomial(degree=1),
+        estimator=LeastSquares(),
+        max_search_depth=1,
+    )
+
+    depth_calls = []
+
+    def fake_down(*args, **kwargs):
+        depth_calls.append(args[4])
+        return args[2], args[3], False, True
+
+    def fake_up(*args, **kwargs):
+        depth_calls.append(args[4])
+        return args[2], args[3], False, True
+
+    monkeypatch.setattr(model, "_down_swing", fake_down)
+    monkeypatch.setattr(model, "_up_swing", fake_up)
+
+    psi = np.eye(2)
+    y = np.ones((3, 1))
+    err, piv, _, _ = model.run_mss_algorithm(psi, y, 2)
+
+    assert err.shape[0] == piv.shape[0]
+    assert depth_calls and max(depth_calls) == 1
+
+
+def test_down_and_up_swing_keep_score_when_no_improvement():
+    model = OOS(
+        n_terms=2,
+        order_selection=False,
+        ylag=1,
+        xlag=1,
+        basis_function=Polynomial(degree=1),
+        estimator=LeastSquares(),
+    )
+
+    psi = np.eye(2)
+    target = np.array([[1.0], [0.0]])
+    sqy = model._compute_squared_y(target)
+    subset = [0, 1]
+    current_score, _ = model._subset_err(psi, target, subset, sqy)
+    all_indices = [0, 1]
+    all_indices_set = set(all_indices)
+
+    updated_subset, updated_score, improved, failed = model._down_swing(
+        psi,
+        target,
+        subset,
+        current_score,
+        1,
+        sqy,
+        all_indices,
+        all_indices_set,
+    )
+    assert updated_subset == subset or updated_score == current_score
+    assert not improved
+    assert not failed or updated_score == current_score
+
+    updated_subset, updated_score, improved, failed = model._up_swing(
+        psi,
+        target,
+        subset,
+        current_score,
+        1,
+        sqy,
+        len(all_indices),
+        all_indices,
+        all_indices_set,
+    )
+    assert updated_subset == subset or updated_score == current_score
+    assert not improved
+    assert not failed or updated_score == current_score
+
+
+def test_osf_process_term_number_exceeds_total_terms():
+    model = OSF(
+        n_terms=5,
+        order_selection=False,
+        ylag=1,
+        xlag=1,
+        basis_function=Polynomial(degree=1),
+        estimator=LeastSquares(),
+    )
+    psi = np.eye(2)
+    y = np.ones((3, 1))
+
+    err, piv, psi_sel, _ = model.run_mss_algorithm(psi, y, 5)
+    assert piv.shape[0] <= psi.shape[1]
+    assert err.shape[0] == psi_sel.shape[1]

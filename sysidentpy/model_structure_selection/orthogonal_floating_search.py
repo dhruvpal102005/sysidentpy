@@ -11,13 +11,12 @@ API (estimators, basis functions, equation formatter, etc.).
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 from itertools import combinations
 
 import numpy as np
 
 from ..basis_function import Fourier, Polynomial
-from ..narmax_base import house, rowhouse
 from ..parameter_estimation.estimators import RecursiveLeastSquares
 from .ofr_base import Estimators, OFRBase, _compute_err_slice
 
@@ -76,15 +75,20 @@ class _OrthogonalFloatingBase(OFRBase):
         """
 
         if not subset:
-            return 0.0, np.array([])
+            return 0.0, np.array([], dtype=float)
 
         psi_sel = psi[:, subset]
+        if psi_sel.size == 0:
+            return 0.0, np.array([], dtype=float)
+
         # Reduced QR gives orthonormal columns (||w_i||=1), aligning with
         # the Gram-Schmidt-based ERR definition without explicit scaling.
         q, _ = np.linalg.qr(psi_sel, mode="reduced")
         g = q.T @ target
-        denom = squared_y if squared_y > 0 else np.finfo(np.float64).eps
-        err_vals = np.square(g).flatten() / denom
+
+        err_vals = np.zeros(len(subset), dtype=float)
+        mapped = g.shape[0]
+        err_vals[:mapped] = np.square(g).flatten() / squared_y
         score = float(np.sum(err_vals))
         return score, err_vals
 
@@ -216,7 +220,7 @@ class _OrthogonalFloatingBase(OFRBase):
         _, base_score_arr = self._subset_err(psi, target, base_subset, squared_y)
         base_score = float(np.sum(base_score_arr))
 
-        best_by_size = {0: (base_score, [])}
+        best_by_size: Dict[int, Tuple[float, Tuple[int, ...]]] = {0: (base_score, ())}
         selected: List[int] = []
         current_score = base_score
         last_added: Optional[int] = None
@@ -239,7 +243,7 @@ class _OrthogonalFloatingBase(OFRBase):
                     break
 
                 prev_best_score = best_by_size.get(
-                    len(selected_terms) - 1, (-np.inf, [])
+                    len(selected_terms) - 1, (-np.inf, ())
                 )[0]
                 if (flag_first_removal == 1 and ls_idx == last_added_term) or (
                     ls_score <= prev_best_score
@@ -251,7 +255,7 @@ class _OrthogonalFloatingBase(OFRBase):
                 if ls_score > prev_best_score:
                     best_by_size[len(selected_terms)] = (
                         ls_score,
-                        selected_terms.copy(),
+                        tuple(selected_terms),
                     )
 
                 flag_first_removal = 0
@@ -271,16 +275,16 @@ class _OrthogonalFloatingBase(OFRBase):
             )
 
             stored_score, stored_subset = best_by_size.get(
-                len(candidate_selected), (-np.inf, [])
+                len(candidate_selected), (-np.inf, ())
             )
 
             if candidate_score > stored_score:
                 selected = candidate_selected
                 current_score = candidate_score
-                best_by_size[len(selected)] = (current_score, selected.copy())
+                best_by_size[len(selected)] = (current_score, tuple(selected))
                 last_added = ms_idx
             else:
-                selected = stored_subset.copy()
+                selected = list(stored_subset)
                 current_score = stored_score
                 last_added = ms_idx
 
@@ -307,11 +311,12 @@ class _OrthogonalFloatingBase(OFRBase):
         if count <= 0 or len(base_subset) == 0:
             return []
 
-        best_by_size = {
-            len(base_subset): self._subset_err(psi, target, base_subset, squared_y)
+        base_score, _ = self._subset_err(psi, target, base_subset, squared_y)
+        best_by_size: Dict[int, Tuple[float, Tuple[int, ...]]] = {
+            len(base_subset): (base_score, tuple(base_subset))
         }
         removed: List[int] = []
-        current_score = best_by_size[len(base_subset)][0]
+        current_score = base_score
         last_removed: Optional[int] = None
 
         while len(removed) < count and (len(base_subset) - len(removed)) > 0:
@@ -324,16 +329,19 @@ class _OrthogonalFloatingBase(OFRBase):
             )
 
             stored_score, stored_removed = best_by_size.get(
-                len(candidate_subset), (-np.inf, [])
+                len(candidate_subset), (-np.inf, ())
             )
 
             if candidate_score > stored_score:
                 removed = candidate_removed
                 current_score = candidate_score
-                best_by_size[len(candidate_subset)] = (current_score, removed.copy())
+                best_by_size[len(candidate_subset)] = (
+                    current_score,
+                    tuple(removed),
+                )
                 last_removed = ls_idx
             else:
-                removed = stored_removed.copy()
+                removed = list(stored_removed)
                 current_score = stored_score
                 last_removed = ls_idx
 
@@ -345,7 +353,7 @@ class _OrthogonalFloatingBase(OFRBase):
                     psi, target, working_subset, squared_y
                 )
                 prev_best_score = best_by_size.get(
-                    len(working_subset) - 1, (-np.inf, [])
+                    len(working_subset) - 1, (-np.inf, ())
                 )[0]
                 if (flag_first_removal == 1 and next_idx == last_removed) or (
                     next_score <= prev_best_score
@@ -356,7 +364,7 @@ class _OrthogonalFloatingBase(OFRBase):
                 current_score = next_score
                 best_by_size[len(working_subset) - 1] = (
                     current_score,
-                    removed.copy(),
+                    tuple(removed),
                 )
                 flag_first_removal = 0
 
@@ -371,7 +379,7 @@ class _OrthogonalFloatingBase(OFRBase):
         target: np.ndarray,
         subset: List[int],
         current_score: float,
-        best_by_size: dict,
+        best_by_size: Dict[int, Tuple[float, Tuple[int, ...]]],
         squared_y: float,
         last_added: Optional[int],
     ) -> Tuple[List[int], float]:
@@ -380,7 +388,7 @@ class _OrthogonalFloatingBase(OFRBase):
         flag_first_removal = 1
         while len(subset) > 2:
             ls_idx, ls_score = self._best_removal(psi, target, subset, squared_y)
-            prev_best_score = best_by_size.get(len(subset) - 1, (-np.inf, []))[0]
+            prev_best_score = best_by_size.get(len(subset) - 1, (-np.inf, ()))[0]
             if (flag_first_removal == 1 and ls_idx == last_added) or (
                 ls_score <= prev_best_score
             ):
@@ -389,26 +397,26 @@ class _OrthogonalFloatingBase(OFRBase):
             subset = [t for t in subset if t != ls_idx]
             current_score = ls_score
             if ls_score > prev_best_score:
-                best_by_size[len(subset)] = (ls_score, subset.copy())
+                best_by_size[len(subset)] = (ls_score, tuple(subset))
 
             flag_first_removal = 0
 
         return subset, current_score
 
-
-class OSF(_OrthogonalFloatingBase):
-    """Orthogonal Sequential Floating search (paper Section 3.2)."""
-
-    def run_mss_algorithm(
-        self, psi: np.ndarray, y: np.ndarray, process_term_number: int
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        target = self._default_estimation_target(y)
-        squared_y = self._compute_squared_y(target)
+    def _floating_forward_search(
+        self,
+        psi: np.ndarray,
+        target: np.ndarray,
+        process_term_number: int,
+        squared_y: float,
+        swap_callback=None,
+    ) -> List[int]:
+        """Shared floating forward search used by OSF and OIF."""
 
         total_terms = psi.shape[1]
         all_indices = list(range(total_terms))
 
-        best_by_size = {0: (0.0, [])}
+        best_by_size: Dict[int, Tuple[float, Tuple[int, ...]]] = {0: (0.0, ())}
         subset: List[int] = []
         current_score = 0.0
         last_added: Optional[int] = None
@@ -428,22 +436,70 @@ class OSF(_OrthogonalFloatingBase):
             )
 
             stored_score, stored_subset = best_by_size.get(
-                len(candidate_subset), (-np.inf, [])
+                len(candidate_subset), (-np.inf, ())
             )
 
             if candidate_score > stored_score:
                 subset = candidate_subset
                 current_score = candidate_score
-                best_by_size[len(subset)] = (current_score, subset.copy())
+                best_by_size[len(subset)] = (current_score, tuple(subset))
                 last_added = ms_idx
             else:
-                subset = stored_subset.copy()
+                subset = list(stored_subset)
                 current_score = stored_score
                 last_added = ms_idx
 
             subset, current_score = self._backtrack(
-                psi, target, subset, current_score, best_by_size, squared_y, last_added
+                psi,
+                target,
+                subset,
+                current_score,
+                best_by_size,
+                squared_y,
+                last_added,
             )
+
+            if swap_callback is not None:
+                subset, current_score, swap_added = swap_callback(
+                    psi,
+                    target,
+                    subset,
+                    current_score,
+                    best_by_size,
+                    all_indices,
+                    squared_y,
+                )
+                if swap_added is not None:
+                    subset, current_score = self._backtrack(
+                        psi,
+                        target,
+                        subset,
+                        current_score,
+                        best_by_size,
+                        squared_y,
+                        swap_added,
+                    )
+
+        return subset
+
+
+class OSF(_OrthogonalFloatingBase):
+    """Orthogonal Sequential Floating search (paper Section 3.2).
+
+    Iteratively adds and conditionally removes regressors based on the ERR
+    criterion. Preserves API compatibility with other model structure selection
+    classes; the constructor mirrors ``OFRBase`` arguments.
+    """
+
+    def run_mss_algorithm(
+        self, psi: np.ndarray, y: np.ndarray, process_term_number: int
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Execute the OSF search and return ERR values and selected pivots."""
+        target = self._default_estimation_target(y)
+        squared_y = self._compute_squared_y(target)
+        subset = self._floating_forward_search(
+            psi, target, process_term_number, squared_y
+        )
 
         _, err_vals = self._subset_err(psi, target, subset, squared_y)
         piv = np.array(subset, dtype=int)
@@ -452,75 +508,25 @@ class OSF(_OrthogonalFloatingBase):
 
 
 class OIF(OSF):
-    """Orthogonal Improved Floating search (paper Section 3.3)."""
+    """Orthogonal Improved Floating search (paper Section 3.3).
+
+    Extends ``OSF`` with a swapping step that replaces weak terms with more
+    significant candidates when it improves the ERR score.
+    """
 
     def run_mss_algorithm(
         self, psi: np.ndarray, y: np.ndarray, process_term_number: int
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Execute the OIF search and return ERR values and selected pivots."""
         target = self._default_estimation_target(y)
         squared_y = self._compute_squared_y(target)
-        total_terms = psi.shape[1]
-        all_indices = list(range(total_terms))
-
-        best_by_size = {0: (0.0, [])}
-        subset: List[int] = []
-        current_score = 0.0
-        last_added: Optional[int] = None
-
-        while len(subset) < process_term_number and len(subset) < total_terms:
-            available = [idx for idx in all_indices if idx not in subset]
-            if not available:
-                break
-
-            ms_idx, _ = self._best_addition(psi, target, subset, available, squared_y)
-            if ms_idx is None:
-                break
-
-            candidate_subset = subset + [ms_idx]
-            candidate_score, _ = self._subset_err(
-                psi, target, candidate_subset, squared_y
-            )
-
-            stored_score, stored_subset = best_by_size.get(
-                len(candidate_subset), (-np.inf, [])
-            )
-
-            if candidate_score > stored_score:
-                subset = candidate_subset
-                current_score = candidate_score
-                best_by_size[len(subset)] = (current_score, subset.copy())
-                last_added = ms_idx
-            else:
-                subset = stored_subset.copy()
-                current_score = stored_score
-                last_added = ms_idx
-
-            subset, current_score = self._backtrack(
-                psi, target, subset, current_score, best_by_size, squared_y, last_added
-            )
-
-            # Swapping step: replace one weak term by the most significant
-            # available term (Definition 3 based swap).
-            subset, current_score, swap_added = self._swap_step(
-                psi,
-                target,
-                subset,
-                current_score,
-                best_by_size,
-                all_indices,
-                squared_y,
-            )
-
-            if swap_added is not None:
-                subset, current_score = self._backtrack(
-                    psi,
-                    target,
-                    subset,
-                    current_score,
-                    best_by_size,
-                    squared_y,
-                    swap_added,
-                )
+        subset = self._floating_forward_search(
+            psi,
+            target,
+            process_term_number,
+            squared_y,
+            swap_callback=self._swap_step,
+        )
 
         _, err_vals = self._subset_err(psi, target, subset, squared_y)
         piv = np.array(subset, dtype=int)
@@ -533,7 +539,7 @@ class OIF(OSF):
         target: np.ndarray,
         subset: List[int],
         current_score: float,
-        best_by_size: dict,
+        best_by_size: Dict[int, Tuple[float, Tuple[int, ...]]],
         all_indices: List[int],
         squared_y: float,
     ) -> Tuple[List[int], float, Optional[int]]:
@@ -559,7 +565,7 @@ class OIF(OSF):
                 best_added = ms_idx
 
         if best_score > current_score:
-            best_by_size[len(best_subset)] = (best_score, best_subset.copy())
+            best_by_size[len(best_subset)] = (best_score, tuple(best_subset))
             return best_subset, best_score, best_added
 
         return subset, current_score, None
@@ -616,7 +622,8 @@ class OOS(_OrthogonalFloatingBase):
             return
         if not isinstance(self.max_search_depth, int) or self.max_search_depth < 1:
             raise ValueError(
-                f"max_search_depth must be integer and > zero. Got {self.max_search_depth}"
+                "max_search_depth must be a positive int or None; "
+                f"got {self.max_search_depth!r} (type={type(self.max_search_depth).__name__})"
             )
 
     def _resolve_search_depth(self, process_term_number: int, total_terms: int) -> int:
@@ -631,144 +638,181 @@ class OOS(_OrthogonalFloatingBase):
         depth = int(np.floor(0.25 * smaller_side))
         return max(1, depth)
 
+    def _down_swing(
+        self,
+        psi: np.ndarray,
+        target: np.ndarray,
+        subset: List[int],
+        current_score: float,
+        depth: int,
+        squared_y: float,
+        all_indices: List[int],
+        all_indices_set: set,
+    ) -> Tuple[List[int], float, bool, bool]:
+        """Perform a down swing (remove then add) returning updated state."""
+
+        if len(subset) < depth:
+            return subset, current_score, False, True
+
+        working_subset = subset.copy()
+        to_remove = self._select_least_significant_subset(
+            psi, target, working_subset, depth, squared_y
+        )
+
+        if len(to_remove) != depth:
+            return subset, current_score, False, True
+
+        working_subset = [t for t in working_subset if t not in to_remove]
+        available_set = all_indices_set.difference(working_subset)
+        if len(available_set) < depth:
+            return subset, current_score, False, True
+
+        available_down = [idx for idx in all_indices if idx in available_set]
+        ms_terms = self._select_most_significant_subset(
+            psi,
+            target,
+            working_subset,
+            available_down,
+            depth,
+            squared_y,
+        )
+
+        if len(ms_terms) != depth:
+            return subset, current_score, False, True
+
+        working_subset = working_subset + ms_terms
+        down_score, _ = self._subset_err(psi, target, working_subset, squared_y)
+
+        if down_score > current_score:
+            return working_subset, down_score, True, False
+
+        return subset, current_score, False, True
+
+    def _up_swing(
+        self,
+        psi: np.ndarray,
+        target: np.ndarray,
+        subset: List[int],
+        current_score: float,
+        depth: int,
+        squared_y: float,
+        total_terms: int,
+        all_indices: List[int],
+        all_indices_set: set,
+    ) -> Tuple[List[int], float, bool, bool]:
+        """Perform an up swing (add then remove) returning updated state."""
+
+        if len(subset) + depth > total_terms:
+            return subset, current_score, False, True
+
+        available_set = all_indices_set.difference(subset)
+        if len(available_set) < depth:
+            return subset, current_score, False, True
+
+        available_up = [idx for idx in all_indices if idx in available_set]
+        ms_terms_up = self._select_most_significant_subset(
+            psi,
+            target,
+            subset,
+            available_up,
+            depth,
+            squared_y,
+        )
+
+        if len(ms_terms_up) != depth:
+            return subset, current_score, False, True
+
+        working_subset = subset + ms_terms_up
+        to_remove_up = self._select_least_significant_subset(
+            psi, target, working_subset, depth, squared_y
+        )
+
+        if len(to_remove_up) != depth:
+            return subset, current_score, False, True
+
+        working_subset = [t for t in working_subset if t not in to_remove_up]
+        up_score, _ = self._subset_err(psi, target, working_subset, squared_y)
+
+        if up_score > current_score:
+            return working_subset, up_score, True, False
+
+        return subset, current_score, False, True
+
     def run_mss_algorithm(
         self, psi: np.ndarray, y: np.ndarray, process_term_number: int
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Execute the oscillating search with alternating down/up swings."""
         target = self._default_estimation_target(y)
         squared_y = self._compute_squared_y(target)
         total_terms = psi.shape[1]
         all_indices = list(range(total_terms))
+        all_indices_set = set(all_indices)
 
         # Resolve depth once we know xi and n, as suggested by the paper.
         max_depth = self._resolve_search_depth(process_term_number, total_terms)
 
         # Initial model: greedy inclusion of ``process_term_number`` terms.
         subset: List[int] = []
-        available = all_indices.copy()
+        available_set = all_indices_set.copy()
         for _ in range(min(process_term_number, total_terms)):
-            ms_idx, _ = self._best_addition(psi, target, subset, available, squared_y)
+            available_sorted = [idx for idx in all_indices if idx in available_set]
+            ms_idx, _ = self._best_addition(
+                psi, target, subset, available_sorted, squared_y
+            )
             if ms_idx is None:
                 break
             subset.append(ms_idx)
-            available.remove(ms_idx)
+            available_set.discard(ms_idx)
 
         current_score, _ = self._subset_err(psi, target, subset, squared_y)
 
-        o = 1
-        # Flags f1/f2 track consecutive failures of down/up swings as in Alg. 2.
-        f1 = 0
-        f2 = 0
+        depth = 1
+        failed_down = False
+        failed_up = False
 
-        while o <= max_depth and len(subset) > 0:
+        while depth <= max_depth and len(subset) > 0:
             improvement = False
 
-            # Down swing: remove exactly o least significant, then add o most significant.
-            if len(subset) >= o:
-                down_subset = subset.copy()
-                to_remove = self._select_least_significant_subset(
-                    psi, target, down_subset, o, squared_y
-                )
+            subset, current_score, down_improved, failed_down = self._down_swing(
+                psi,
+                target,
+                subset,
+                current_score,
+                depth,
+                squared_y,
+                all_indices,
+                all_indices_set,
+            )
+            improvement = improvement or down_improved
 
-                if len(to_remove) == o:
-                    down_subset = [t for t in down_subset if t not in to_remove]
-
-                    available_down = [
-                        idx for idx in all_indices if idx not in down_subset
-                    ]
-                    if len(available_down) >= o:
-                        ms_terms = self._select_most_significant_subset(
-                            psi,
-                            target,
-                            down_subset,
-                            available_down,
-                            o,
-                            squared_y,
-                        )
-                    else:
-                        ms_terms = []
-
-                    if len(ms_terms) == o:
-                        down_subset = down_subset + ms_terms
-                        down_score, _ = self._subset_err(
-                            psi, target, down_subset, squared_y
-                        )
-
-                        if down_score > current_score:
-                            subset = down_subset
-                            current_score = down_score
-                            improvement = True
-                            f1 = 0
-                        else:
-                            f1 = 1
-                    else:
-                        f1 = 1
-                else:
-                    f1 = 1
-            else:
-                f1 = 1
-
-            # If both down and previous up swings failed, increase depth before the up swing.
-            if f1 == 1 and f2 == 1:
-                o += 1
-                f1 = 0
-                f2 = 0
-                if o > max_depth:
+            if failed_down and failed_up:
+                depth += 1
+                failed_down = False
+                failed_up = False
+                if depth > max_depth:
                     break
 
-            # Up swing: add o most significant, then remove o least significant.
-            if len(subset) + o <= total_terms:
-                up_subset = subset.copy()
-                available_up = [idx for idx in all_indices if idx not in up_subset]
-                if len(available_up) >= o:
-                    ms_terms_up = self._select_most_significant_subset(
-                        psi,
-                        target,
-                        up_subset,
-                        available_up,
-                        o,
-                        squared_y,
-                    )
-                else:
-                    ms_terms_up = []
-
-                if len(ms_terms_up) == o:
-                    up_subset = up_subset + ms_terms_up
-
-                    to_remove_up = self._select_least_significant_subset(
-                        psi, target, up_subset, o, squared_y
-                    )
-                    if len(to_remove_up) == o:
-                        up_subset = [t for t in up_subset if t not in to_remove_up]
-                        up_score, _ = self._subset_err(
-                            psi, target, up_subset, squared_y
-                        )
-
-                        if up_score > current_score:
-                            subset = up_subset
-                            current_score = up_score
-                            improvement = True
-                            f2 = 0
-                        else:
-                            f2 = 1
-                    else:
-                        f2 = 1
-                else:
-                    f2 = 1
-            else:
-                f2 = 1
+            subset, current_score, up_improved, failed_up = self._up_swing(
+                psi,
+                target,
+                subset,
+                current_score,
+                depth,
+                squared_y,
+                total_terms,
+                all_indices,
+                all_indices_set,
+            )
+            improvement = improvement or up_improved
 
             if improvement:
-                o = 1
-                f1 = 0
-                f2 = 0
-            else:
-                if f1 == 1 and f2 == 1:
-                    o += 1
-                    f1 = 0
-                    f2 = 0
-                else:
-                    # Alternate swings but keep depth.
-                    pass
+                depth = 1
+                failed_down = False
+                failed_up = False
+            elif failed_down and failed_up:
+                depth += 1
+                failed_down = False
+                failed_up = False
 
         _, err_vals = self._subset_err(psi, target, subset, squared_y)
         piv = np.array(subset, dtype=int)
