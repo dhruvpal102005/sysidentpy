@@ -18,7 +18,7 @@ import numpy as np
 
 from ..basis_function import Fourier, Polynomial
 from ..parameter_estimation.estimators import RecursiveLeastSquares
-from .ofr_base import Estimators, OFRBase, _compute_err_slice
+from .ofr_base import Estimators, OFRBase
 
 
 class _OrthogonalFloatingBase(OFRBase):
@@ -59,7 +59,6 @@ class _OrthogonalFloatingBase(OFRBase):
             apress_lambda=apress_lambda,
         )
 
-    # --------- low-level ERR utilities ---------
     def _subset_err(
         self,
         psi: np.ndarray,
@@ -75,8 +74,6 @@ class _OrthogonalFloatingBase(OFRBase):
         if psi_sel.size == 0:
             return 0.0, np.array([], dtype=float)
 
-        # Reduced QR gives orthonormal columns (||w_i||=1), aligning with
-        # the Gram-Schmidt-based ERR definition without explicit scaling.
         q, _ = np.linalg.qr(psi_sel, mode="reduced")
         g = q.T @ target
 
@@ -91,7 +88,6 @@ class _OrthogonalFloatingBase(OFRBase):
         squared_y = float(np.dot(target.T, target).item())
         return squared_y if squared_y > self.eps else float(self.eps)
 
-    # --------- local search building blocks ---------
     def _best_addition(
         self,
         psi: np.ndarray,
