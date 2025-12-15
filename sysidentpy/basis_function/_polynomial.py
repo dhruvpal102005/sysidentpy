@@ -28,6 +28,9 @@ class Polynomial(BaseBasisFunction):
     degree : int (max_degree), default=2
         The maximum degree of the polynomial features.
 
+    include_bias : bool, default=True
+        Whether to include the bias (constant) term in the output feature matrix.
+
     Notes
     -----
     Be aware that the number of features in the output array scales
@@ -38,9 +41,10 @@ class Polynomial(BaseBasisFunction):
     def __init__(
         self,
         degree: int = 2,
+        include_bias: bool = True,
     ):
         self.degree = degree
-        # Cache combination indices per (n_features, degree) to avoid rebuilding
+        self.include_bias = include_bias
         self._combination_cache: Dict[Tuple[int, int], np.ndarray] = {}
 
     def _get_combination_indices(self, n_features: int) -> np.ndarray:
@@ -115,9 +119,12 @@ class Polynomial(BaseBasisFunction):
             The lagged matrix built in respect with each lag and column.
 
         """
-        # Create combinations of all columns based on its index
         psi = self._evaluate_terms(data, predefined_regressors)
-        return psi[max_lag:, :]
+        psi = psi[max_lag:, :]
+        if self.include_bias:
+            bias_column = np.ones((psi.shape[0], 1))
+            psi = np.hstack((bias_column, psi))
+        return psi
 
     def transform(
         self,

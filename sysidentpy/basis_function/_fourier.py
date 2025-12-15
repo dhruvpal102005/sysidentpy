@@ -39,6 +39,9 @@ class Fourier(BaseBasisFunction):
     degree : int (max_degree), default=2
         The maximum degree of the polynomial features.
 
+    include_bias : bool, default=True
+        Whether to include the bias (constant) term in the output feature matrix.
+
     Notes
     -----
     Be aware that the number of features in the output array scales
@@ -47,11 +50,12 @@ class Fourier(BaseBasisFunction):
     """
 
     def __init__(
-        self, n: int = 1, p: float = 2 * np.pi, degree: int = 1, ensemble: bool = True
+        self, n: int = 1, p: float = 2 * np.pi, degree: int = 1, include_bias: bool = True, ensemble: bool = True
     ):
         self.n = n
         self.p = p
         self.degree = degree
+        self.include_bias = include_bias
         self.ensemble = ensemble
 
     def _fourier_expansion(self, data: np.ndarray, n: int):
@@ -124,6 +128,10 @@ class Fourier(BaseBasisFunction):
             psi = np.column_stack([data, psi])
         else:
             psi = psi[:, 1:]
+
+        if self.include_bias:
+            bias_column = np.ones((psi.shape[0], 1))
+            psi = np.hstack((bias_column, psi))
 
         if predefined_regressors is None:
             return psi
